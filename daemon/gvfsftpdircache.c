@@ -511,7 +511,7 @@ g_vfs_ftp_dir_cache_funcs_process (GInputStream *        stream,
                                    GCancellable *        cancellable,
                                    GError **             error)
 {
-  struct list_state state = { 0, };
+  struct list_state state = { NULL, };
   GDataInputStream *data;
   GFileInfo *info;
   int type;
