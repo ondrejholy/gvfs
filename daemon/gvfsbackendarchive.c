@@ -121,17 +121,35 @@ gvfs_archive_read (struct archive *archive,
   return read_bytes;
 }
 
+/* Seek in the archive input stream (a libarchive callback). */
 static off_t
-gvfs_archive_skip (struct archive *archive,
-		   void           *data,
-		   off_t	    request)
+gvfs_archive_seek (struct archive *archive,
+		   void           *data, 
+		   off_t           request, 
+		   int             whence)
 {
   GVfsArchive *d = data;
+  GSeekType g_whence;
 
+  switch (whence)
+    {
+      case SEEK_SET: 
+        g_whence = G_SEEK_SET;
+        break;
+      case SEEK_CUR:
+        g_whence = G_SEEK_CUR;
+        break;
+      case SEEK_END:
+        g_whence = G_SEEK_END;
+        break;
+      default:
+        return 0;
+    }
+    
   if (g_seekable_can_seek (G_SEEKABLE (d->stream)))
     g_seekable_seek (G_SEEKABLE (d->stream),
 		     request,
-		     G_SEEK_CUR,
+		     g_whence,
 		     d->job->cancellable,
 		     &d->error);
   else
@@ -146,6 +164,15 @@ gvfs_archive_skip (struct archive *archive,
       (int) g_seekable_tell (G_SEEKABLE (d->stream)));
 
   return request;
+}
+
+/* Skip in the archive input stream (a libarchive callback). */
+static off_t
+gvfs_archive_skip (struct archive *archive,
+		   void           *data,
+		   off_t           request)
+{
+  return gvfs_archive_seek (archive, data, request, SEEK_CUR);
 }
 
 static int
@@ -222,6 +249,7 @@ gvfs_archive_new (GVfsBackendArchive *ba, GVfsJob *job)
   d->archive = archive_read_new ();
   archive_read_support_compression_all (d->archive);
   archive_read_support_format_all (d->archive);
+  archive_read_set_seek_callback (d->archive, gvfs_archive_seek);
   archive_read_open2 (d->archive,
 		      d,
 		      gvfs_archive_open,
