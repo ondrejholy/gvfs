@@ -1,6 +1,7 @@
 /* GIO - GLib Input, Output and Streaming Library
  * 
  * Copyright (C) 2008 Benjamin Otte <otte@gnome.org>
+ *               2012 Ondrej Holy <xholyo00@stud.fit.vutbr.com>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -18,11 +19,16 @@
  * Boston, MA 02111-1307, USA.
  *
  * Author: Benjmain Otte <otte@gnome.org>
+ *         Ondrej Holy <xholyo00@stud.fit.vutbr.com>
  */
 
 
 #include <config.h>
 
+#include <stdlib.h>
+#include <sys/stat.h>
+#include <errno.h>
+#include <glib/gstdio.h>
 #include <glib/gi18n.h>
 #include <string.h>
 #include <archive.h>
@@ -46,7 +52,7 @@
 
 #define MOUNT_ICON_NAME "drive-removable-media"
 
-/* #define PRINT_DEBUG  */
+#define PRINT_DEBUG  
 
 #ifdef PRINT_DEBUG
 #define DEBUG g_print
@@ -61,14 +67,19 @@ struct _ArchiveFile {
   char *	name;			/* name of the file inside the archive */
   GFileInfo *	info;			/* file info created from archive_entry */
   GSList *	children;		/* (unordered) list of child files */
+  ArchiveFile * parent;                 /* The parent of the archive file. */
 };
 
 struct _GVfsBackendArchive
 {
-  GVfsBackend		backend;
+  GVfsBackend           backend;        /* The backend class. */
 
-  GFile *		file;
-  ArchiveFile *		files;		/* the tree of files */
+  GFile *               file;           /* The archive file. */
+  ArchiveFile *         files;          /* The tree of files. */
+  
+  int                   format;         /* The format of the archive file. */
+  int                   filters_count;  /* The number of the filters. */
+  int *                 filters;        /* The filters of the archive. */
 };
 
 G_DEFINE_TYPE (GVfsBackendArchive, g_vfs_backend_archive, G_VFS_TYPE_BACKEND)
@@ -77,31 +88,61 @@ static void backend_unmount (GVfsBackendArchive *ba);
 
 /*** AN ARCHIVE WE CAN OPERATE ON ***/
 
-typedef struct {
-  struct archive *  archive;
-  GFile *	    file;
-  GFileInputStream *stream;
-  GVfsJob *	    job;
-  GError *	    error;
-  guchar	    data[4096];
+#define BLOCKSIZE 1024                  /* The size of the copy buffers. */
+
+typedef struct 
+{
+  struct archive *      archive;        /* The archive handler for reading. */
+  GFile *               file;           /* The archive file. */
+  GFileInputStream *    stream;         /* The stream for reading the file. */
+  
+  struct archive *      temp_archive;   /* The archive handler for writing. */
+  GFile *               temp_file;      /* The temporary archive file. */
+  GFileOutputStream *   temp_stream;    /* The stream for writing the file. */
+  
+  GVfsJob *             job;            /* The job which is processed. */
+  guchar                data[BLOCKSIZE];/* The buffer for IO operations. */
+  GError *              error;          /* The error of the archive. */
 } GVfsArchive;
 
-#define gvfs_archive_return(d) ((d)->error ? ARCHIVE_FATAL : ARCHIVE_OK)
-
+/* Open the archive input stream (a libarchive callback). */
 static int
-gvfs_archive_open (struct archive *archive, 
-                   void           *data)
+gvfs_archive_read_open (struct archive *archive, 
+                        void           *data)
 {
   GVfsArchive *d = data;
 
-  DEBUG ("OPEN\n");
+  DEBUG ("OPEN (read)\n");
   g_assert (d->stream == NULL);
+  
   d->stream = g_file_read (d->file,
 			   d->job->cancellable,
 			   &d->error);
-  return gvfs_archive_return (d);
+
+  return d->error ? ARCHIVE_FATAL : ARCHIVE_OK;
 }
 
+/* Open the archive output stream (a libarchive callback). */
+static int
+gvfs_archive_write_open (struct archive *archive, 
+                         void           *data)
+{
+  GVfsArchive *d = data;
+
+  DEBUG ("OPEN (write)\n");
+  g_assert (d->temp_stream == NULL);
+  
+  d->temp_stream = g_file_replace (d->temp_file,
+                                   NULL,
+                                   FALSE,
+                                   G_FILE_CREATE_REPLACE_DESTINATION,
+                                   d->job->cancellable,
+                                   &d->error);
+
+  return d->error ? ARCHIVE_FATAL : ARCHIVE_OK;
+}
+
+/* Read data from the archive (a libarchive callback). */
 static ssize_t
 gvfs_archive_read (struct archive *archive, 
 		   void           *data,
@@ -121,12 +162,33 @@ gvfs_archive_read (struct archive *archive,
   return read_bytes;
 }
 
+/* Write data into the archive (a libarchive callback). */
+static ssize_t 
+gvfs_archive_write (struct archive *archive, 
+                    void           *data, 
+                    const void     *buffer, 
+                    size_t          length)
+{
+  GVfsArchive *d = data;
+  gssize write_bytes;
+  
+  write_bytes = g_output_stream_write (G_OUTPUT_STREAM (d->temp_stream),
+                                       buffer,
+                                       length,
+                                       d->job->cancellable,
+                                       &d->error);
+  
+  DEBUG ("WRITE %d (%d)\n", (int) write_bytes, length);
+    
+  return write_bytes;
+}
+
 /* Seek in the archive input stream (a libarchive callback). */
 static off_t
-gvfs_archive_seek (struct archive *archive,
-		   void           *data, 
-		   off_t           request, 
-		   int             whence)
+gvfs_archive_read_seek (struct archive *archive,
+                        void           *data, 
+                        off_t           request, 
+                        int             whence)
 {
   GVfsArchive *d = data;
   GSeekType g_whence;
@@ -144,6 +206,7 @@ gvfs_archive_seek (struct archive *archive,
         g_whence = G_SEEK_END;
         break;
       default:
+        DEBUG ("unknown seek type (%d)\n", whence);
         return ARCHIVE_FATAL;
     }
     
@@ -172,56 +235,92 @@ gvfs_archive_seek (struct archive *archive,
 
 /* Skip in the archive input stream (a libarchive callback). */
 static off_t
-gvfs_archive_skip (struct archive *archive,
-		   void           *data,
-		   off_t           request)
+gvfs_archive_read_skip (struct archive *archive,
+                        void           *data,
+                        off_t           request)
 {
-  if (gvfs_archive_seek (archive, data, request, SEEK_CUR) < ARCHIVE_OK)
+  if (gvfs_archive_read_seek (archive, data, request, SEEK_CUR) < ARCHIVE_OK)
     return 0;
   
   return request;
 }
 
+/* Close the archive input stream (a libarchive callback). */
 static int
-gvfs_archive_close (struct archive *archive,
-	      void *data)
+gvfs_archive_read_close (struct archive *archive,
+                         void           *data)
 {
   GVfsArchive *d = data;
-
-  DEBUG ("CLOSE\n");
+  
+  DEBUG ("CLOSE (read)\n");
+  
   g_object_unref (d->stream);
   d->stream = NULL;
+
   return ARCHIVE_OK;
 }
 
+/* Close the archive output stream (a libarchive callback). */
+static int
+gvfs_archive_write_close (struct archive *archive,
+                          void           *data)
+{
+  GVfsArchive *d = data;
+  
+  DEBUG ("CLOSE (write)\n");
+  
+  g_object_unref (d->temp_stream);
+  d->temp_stream = NULL;
+  
+  return ARCHIVE_OK;
+}
+
+/* Tell whether the archive is in error. */
 #define gvfs_archive_in_error(archive) ((archive)->error != NULL)
 
+/* Set an error from the archive error. */
 static void
 gvfs_archive_set_error_from_errno (GVfsArchive *archive)
 {
+  struct archive *error_archive = NULL;
+  
   if (gvfs_archive_in_error (archive))
     return;
-
-  g_vfs_job_failed_literal (archive->job,
-                            G_IO_ERROR,
-                            g_io_error_from_errno (archive_errno (archive->archive)),
-                            archive_error_string (archive->archive));
+  
+  /* Find an archive structure in error. */
+  if (archive->archive != NULL)
+    if (archive_errno (archive->archive) != ARCHIVE_OK)
+      error_archive = archive->archive;
+  if (archive->temp_archive != NULL && error_archive == NULL)
+    if (archive_errno (archive->temp_archive) != ARCHIVE_OK)
+      error_archive = archive->temp_archive;
+  
+  g_assert (error_archive != NULL);
+  
+  archive->error = g_error_new_literal (G_IO_ERROR, 
+                     g_io_error_from_errno (archive_errno (error_archive)), 
+                     archive_error_string (error_archive));
 }
 
+/* Push the job into the archive structure. */
 static void 
-gvfs_archive_push_job (GVfsArchive *archive, GVfsJob *job)
+gvfs_archive_push_job (GVfsArchive *archive,
+                       GVfsJob *job)
 {
+  g_assert (job != NULL);
+  DEBUG ("pushing job %s\n", G_OBJECT_TYPE_NAME (job));
+  
   archive->job = job;
 }
 
+/* Pop the archive job and set the gvfs job result. */
 static void 
 gvfs_archive_pop_job (GVfsArchive *archive)
 {
-  if (archive->job == NULL)
-    return;
-
+  g_assert (archive->job != NULL);    
   DEBUG ("popping job %s\n", G_OBJECT_TYPE_NAME (archive->job));
-  if (archive->error)
+  
+  if (gvfs_archive_in_error (archive))
     {
       g_vfs_job_failed_from_error (archive->job, archive->error);
       g_clear_error (&archive->error);
@@ -229,43 +328,271 @@ gvfs_archive_pop_job (GVfsArchive *archive)
   else
     g_vfs_job_succeeded (archive->job);
 
-
   archive->job = NULL;
 }
 
+/* Close the archive and optionaly pop the job. */
 static void
-gvfs_archive_finish (GVfsArchive *archive)
-{
-  gvfs_archive_pop_job (archive);
+gvfs_archive_free (GVfsArchive *archive, 
+                   gboolean     pop)
+{        
+  if (archive->temp_archive != NULL)
+    {
+      archive_write_free (archive->temp_archive);
+      
+      /* Replace the archive file by the temporary file. */
+      if (!gvfs_archive_in_error (archive))
+        {
+          g_file_move (archive->temp_file, 
+                       archive->file, 
+                       G_FILE_COPY_OVERWRITE | G_FILE_COPY_TARGET_DEFAULT_PERMS, 
+                       archive->job->cancellable, 
+                       NULL, 
+                       NULL, 
+                       &archive->error);
+        }
+      else
+        g_file_delete (archive->temp_file, 
+                       archive->job->cancellable, 
+                       &archive->error);
+     } 
+ 
+  if (archive->archive != NULL)
+    archive_read_free (archive->archive);
+ 
+  if (pop)
+    gvfs_archive_pop_job (archive);
 
-  archive_read_finish (archive->archive);
+  g_clear_error (&archive->error);
   g_slice_free (GVfsArchive, archive);
 }
 
-/* NB: assumes an GVfsArchive initialized with ARCHIVE_DATA_INIT */
+/* Close the archive and pop the job. */
+#define gvfs_archive_finish(archive) gvfs_archive_free ((archive), TRUE);
+
+/* Create a new readonly archive structure. */
 static GVfsArchive *
-gvfs_archive_new (GVfsBackendArchive *ba, GVfsJob *job)
+gvfs_archive_read_new (GVfsBackendArchive *ba, 
+                       GVfsJob            *job)
 {
   GVfsArchive *d;
   
   d = g_slice_new0 (GVfsArchive);
 
-  d->file = ba->file;
   gvfs_archive_push_job (d, job);
-
+  
+  d->file = ba->file;
+  d->stream = NULL;
+  d->temp_file = NULL;
+  d->temp_stream = NULL;
+  d->temp_archive = NULL;
+  
   d->archive = archive_read_new ();
   archive_read_support_compression_all (d->archive);
   archive_read_support_format_all (d->archive);
-  archive_read_set_seek_callback (d->archive, gvfs_archive_seek);
+  archive_read_set_seek_callback (d->archive, gvfs_archive_read_seek);
   archive_read_open2 (d->archive,
-		      d,
-		      gvfs_archive_open,
-		      gvfs_archive_read,
-		      gvfs_archive_skip,
-		      gvfs_archive_close);
-
+                      d,
+                      gvfs_archive_read_open,
+                      gvfs_archive_read,
+                      gvfs_archive_read_skip,
+                      gvfs_archive_read_close);
+    
   return d;
 }
+
+/* Create a new readwrite archive structure. 
+   NB: It assumes the determined archive format by determine_archive_format. */
+static GVfsArchive *
+gvfs_archive_readwrite_new (GVfsBackendArchive *ba, 
+                            GVfsJob            *job)
+{
+  GVfsArchive *d;
+  int i;
+  int result;
+  char *pathname;
+  char *template;
+  
+  d = gvfs_archive_read_new (ba, job);
+  
+  /* Create a temp file. */
+  pathname = g_file_get_path (ba->file);
+  template = g_strconcat (pathname, ".XXXXXX", NULL);
+  /* FIXME: Replace mktemp function by a safer one. */
+  d->temp_file = g_file_new_for_path (mktemp (template));
+  g_free (pathname);
+  g_free (template);
+  
+  /* Set up a format of the archive. */
+  d->temp_archive = archive_write_new ();
+  archive_write_set_format (d->temp_archive, ba->format);
+  for (i = 0; i < ba->filters_count; ++i)
+    archive_write_add_filter (d->temp_archive, ba->filters[i]);
+  archive_write_set_bytes_in_last_block (d->temp_archive, 1);
+  
+  result = archive_write_open (d->temp_archive,
+                               d,
+                               gvfs_archive_write_open,
+                               gvfs_archive_write,
+                               gvfs_archive_write_close);
+  if (result < ARCHIVE_OK)
+    gvfs_archive_set_error_from_errno (d);
+  
+  return d;
+}
+
+/* Read next header from the archive. */
+static int 
+gvfs_archive_read_header (GVfsArchive           *archive,
+                          struct archive_entry **entry)
+{
+  int result;
+  const char *pathname;
+  
+  if (gvfs_archive_in_error (archive))
+    return ARCHIVE_FATAL;  
+  
+  result = archive_read_next_header (archive->archive, entry);
+  if (result == ARCHIVE_OK)
+    {
+      /* Unificate a pathname to be without leading garbage. */
+      pathname = archive_entry_pathname (*entry);
+      if (g_str_has_prefix (pathname, "./"))
+        {
+          pathname += 2;
+          archive_entry_set_pathname (*entry, pathname);
+        }
+    }
+  else if (result < ARCHIVE_OK)
+    gvfs_archive_set_error_from_errno (archive);
+  
+  return result;
+}
+
+/* Write header into the archive. */
+static int
+gvfs_archive_write_header (GVfsArchive          *archive,
+                           struct archive_entry *entry)
+{
+  int result;
+  
+  if (gvfs_archive_in_error (archive))
+    return ARCHIVE_FATAL;
+  
+  result = archive_write_header (archive->temp_archive, entry);
+  if (result < ARCHIVE_OK)
+    gvfs_archive_set_error_from_errno (archive);
+  
+  return result;
+}
+
+/* Read data from the archive. */
+static ssize_t
+gvfs_archive_read_data (GVfsArchive *archive,
+                        guchar      *data,
+                        size_t       size)
+{
+  ssize_t read_bytes;
+  
+  if (gvfs_archive_in_error (archive))
+    return ARCHIVE_FATAL;
+
+  read_bytes = archive_read_data (archive->archive, data, size);
+  if (read_bytes < ARCHIVE_OK)
+    gvfs_archive_set_error_from_errno (archive);
+  
+  return read_bytes;
+}
+
+/* Write data to the archive. */
+static ssize_t 
+gvfs_archive_write_data (GVfsArchive *archive,
+                         guchar      *data,
+                         size_t       size)
+{
+  ssize_t write_bytes;
+  
+  if (gvfs_archive_in_error (archive))
+    return ARCHIVE_FATAL;
+
+  write_bytes = archive_write_data (archive->temp_archive, data, size);
+  if (write_bytes < ARCHIVE_OK)
+    gvfs_archive_set_error_from_errno (archive);
+  
+  return write_bytes;
+}
+
+/* Copy archive data between the read and write handle. */
+static void 
+gvfs_archive_copy_data (GVfsArchive *archive)
+{
+  ssize_t read_bytes;
+  ssize_t write_bytes;
+  guchar buffer[BLOCKSIZE];
+  
+  do
+    {
+      read_bytes = gvfs_archive_read_data (archive,
+                                           buffer,
+                                           sizeof (buffer));
+      write_bytes = gvfs_archive_write_data (archive,
+                                             buffer,
+                                             read_bytes);
+      if (read_bytes != write_bytes && !gvfs_archive_in_error (archive))
+        archive->error = g_error_new_literal (G_IO_ERROR, 
+                           G_IO_ERROR_FAILED, 
+                           _("An archive entry size have not been set."));
+    }
+  while (read_bytes > 0);
+}
+
+/* Copy the archive until find an entry with a pathname prefix. 
+   NB: The prefix must not start with a slash. */
+static struct archive_entry *
+gvfs_archive_copy_prefix (GVfsArchive *archive,
+                          const char  *prefix1,
+                          const char  *prefix2)
+{
+  struct archive_entry *entry;
+  const char *pathname;
+  int result;
+  int length;
+  
+  result = gvfs_archive_read_header (archive, &entry);
+  while (result == ARCHIVE_OK)
+    {
+      pathname = archive_entry_pathname (entry);
+      
+      /* Check a prefix. */
+      if (prefix1 != NULL && g_str_has_prefix (pathname, prefix1))
+        {
+          length = strlen(prefix1);
+          if (pathname[length] == '\0' || 
+              pathname[length] == '/')
+            return entry;
+        }
+      if (prefix2 != NULL && g_str_has_prefix (pathname, prefix2))
+        {
+          length = strlen(prefix2);
+          if (pathname[length] == '\0' || 
+              pathname[length] == '/')
+            return entry;
+        }
+      
+      /* Write the header and data. */
+      gvfs_archive_write_header (archive, entry);
+      gvfs_archive_copy_data (archive);
+           
+      result = gvfs_archive_read_header (archive, &entry);
+    }
+  
+  return NULL;
+}
+
+/* Copy the whole archive. */
+#define gvfs_archive_copy(archive) \
+  gvfs_archive_copy_prefix ((archive), NULL, NULL)
+
 
 /*** BACKEND ***/
 
@@ -323,6 +650,7 @@ archive_file_get_from_path (ArchiveFile *file, const char *filename, gboolean ad
 	      cur->name = names[i];
 	      names[i] = NULL;
 	      file->children = g_slist_prepend (file->children, cur);
+              cur->parent = file;
 	    }
 	  else
 	    {
@@ -351,6 +679,7 @@ create_root_file (GVfsBackendArchive *ba)
 
   root = g_slice_new0 (ArchiveFile);
   root->name = g_strdup ("/");
+  root->parent = NULL;
   ba->files = root;
 
   info = g_file_info_new ();
@@ -372,17 +701,18 @@ create_root_file (GVfsBackendArchive *ba)
   g_file_info_set_attribute_string (info, G_FILE_ATTRIBUTE_STANDARD_FAST_CONTENT_TYPE, "inode/directory");
 
   g_file_info_set_attribute_boolean (info, G_FILE_ATTRIBUTE_ACCESS_CAN_READ, TRUE);
-  g_file_info_set_attribute_boolean (info, G_FILE_ATTRIBUTE_ACCESS_CAN_WRITE, FALSE);
-  g_file_info_set_attribute_boolean (info, G_FILE_ATTRIBUTE_ACCESS_CAN_DELETE, FALSE);
+  g_file_info_set_attribute_boolean (info, G_FILE_ATTRIBUTE_ACCESS_CAN_WRITE, TRUE);
+  g_file_info_set_attribute_boolean (info, G_FILE_ATTRIBUTE_ACCESS_CAN_DELETE, TRUE);
   g_file_info_set_attribute_boolean (info, G_FILE_ATTRIBUTE_ACCESS_CAN_EXECUTE, TRUE);
   g_file_info_set_attribute_boolean (info, G_FILE_ATTRIBUTE_ACCESS_CAN_TRASH, FALSE);
-  g_file_info_set_attribute_boolean (info, G_FILE_ATTRIBUTE_ACCESS_CAN_RENAME, FALSE);
+  g_file_info_set_attribute_boolean (info, G_FILE_ATTRIBUTE_ACCESS_CAN_RENAME, TRUE);
 
   icon = g_themed_icon_new ("folder");
   g_file_info_set_icon (info, icon);
   g_object_unref (icon);
 }
 
+/* Set archive file info from archive entry info. */
 static void
 archive_file_set_info_from_entry (ArchiveFile *	        file, 
 				  struct archive_entry *entry,
@@ -429,6 +759,8 @@ archive_file_set_info_from_entry (ArchiveFile *	        file,
       case AE_IFCHR:
       case AE_IFBLK:
       case AE_IFIFO:
+      case AE_IFSOCK:
+      case AE_IFMT:
 	type = G_FILE_TYPE_SPECIAL;
 	break;
       default:
@@ -441,15 +773,17 @@ archive_file_set_info_from_entry (ArchiveFile *	        file,
 				   file->name,
 				   type);
 
-  g_file_info_set_size (info,
-			archive_entry_size (entry));
+  /* Set size if it is known. */
+  if (archive_entry_size_is_set (entry))
+    g_file_info_set_size (info,
+                          archive_entry_size (entry));
 
   g_file_info_set_attribute_boolean (info, G_FILE_ATTRIBUTE_ACCESS_CAN_READ, TRUE);
-  g_file_info_set_attribute_boolean (info, G_FILE_ATTRIBUTE_ACCESS_CAN_WRITE, FALSE);
-  g_file_info_set_attribute_boolean (info, G_FILE_ATTRIBUTE_ACCESS_CAN_DELETE, FALSE);
-  g_file_info_set_attribute_boolean (info, G_FILE_ATTRIBUTE_ACCESS_CAN_EXECUTE, type == G_FILE_TYPE_DIRECTORY);
+  g_file_info_set_attribute_boolean (info, G_FILE_ATTRIBUTE_ACCESS_CAN_WRITE, TRUE);
+  g_file_info_set_attribute_boolean (info, G_FILE_ATTRIBUTE_ACCESS_CAN_DELETE, TRUE);
+  g_file_info_set_attribute_boolean (info, G_FILE_ATTRIBUTE_ACCESS_CAN_EXECUTE, TRUE);
   g_file_info_set_attribute_boolean (info, G_FILE_ATTRIBUTE_ACCESS_CAN_TRASH, FALSE);
-  g_file_info_set_attribute_boolean (info, G_FILE_ATTRIBUTE_ACCESS_CAN_RENAME, FALSE);
+  g_file_info_set_attribute_boolean (info, G_FILE_ATTRIBUTE_ACCESS_CAN_RENAME, TRUE);
 
   /* Set inode number to reflect absolute position in the archive. */
   g_file_info_set_attribute_uint64 (info,
@@ -477,6 +811,104 @@ const char		*archive_entry_uname(struct archive_entry *);
   */
 
   /* FIXME: do ACLs */
+}
+
+/* Set archive entry info from file info.
+   NB: The pathname must not start with a slash. */
+static void
+archive_entry_set_info (struct archive_entry *entry,
+                        const char           *pathname,
+                        GFileInfo            *info)
+{
+  guint type;
+
+  /* Set up times. */
+  archive_entry_set_birthtime (entry,
+    g_file_info_get_attribute_uint64 (info, G_FILE_ATTRIBUTE_TIME_CREATED),
+    g_file_info_get_attribute_uint32 (info, G_FILE_ATTRIBUTE_TIME_CREATED_USEC) 
+      * 1000);
+  archive_entry_set_atime (entry,
+    g_file_info_get_attribute_uint64 (info, G_FILE_ATTRIBUTE_TIME_ACCESS),
+    g_file_info_get_attribute_uint32 (info, G_FILE_ATTRIBUTE_TIME_ACCESS_USEC) 
+      * 1000);
+  archive_entry_set_ctime (entry,
+    g_file_info_get_attribute_uint64 (info, G_FILE_ATTRIBUTE_TIME_CHANGED),
+    g_file_info_get_attribute_uint32 (info, G_FILE_ATTRIBUTE_TIME_CHANGED_USEC) 
+      * 1000);
+  archive_entry_set_mtime (entry,
+    g_file_info_get_attribute_uint64 (info, G_FILE_ATTRIBUTE_TIME_MODIFIED),
+    g_file_info_get_attribute_uint32 (info, G_FILE_ATTRIBUTE_TIME_MODIFIED_USEC) 
+      * 1000);
+  
+  /* Set up a type. */
+  switch (g_file_info_get_file_type (info))
+    {
+      case G_FILE_TYPE_REGULAR:
+        type = AE_IFREG;
+        break;
+      case G_FILE_TYPE_SYMBOLIC_LINK:
+        archive_entry_set_symlink (entry, 
+                                   g_file_info_get_symlink_target (info) + 1);
+        type = AE_IFLNK;
+        break;
+      case G_FILE_TYPE_DIRECTORY:
+        type = AE_IFDIR;
+        break;
+      case G_FILE_TYPE_SPECIAL:
+        /* Set up a type of the special type. */
+        switch (g_file_info_get_attribute_uint32 (info, 
+                                                  G_FILE_ATTRIBUTE_UNIX_MODE))
+          {
+            case S_IFCHR:
+              type = AE_IFCHR;
+              break;
+            case S_IFBLK:
+              type = AE_IFBLK;
+              break;
+            case S_IFIFO:
+              type = AE_IFIFO;
+              break;
+            case S_IFSOCK:
+              type = AE_IFSOCK;
+              break;
+            case S_IFMT:
+              type = AE_IFMT;
+              break;
+            default:
+              g_warning ("Unknown file mode");
+              type = AE_IFREG;
+              break;
+          }
+        break;
+      default:
+        g_warning ("Unknown file type");
+        type = AE_IFREG;
+        break;
+    }
+  
+  archive_entry_set_filetype (entry, type);
+  archive_entry_set_pathname (entry, pathname);
+  archive_entry_set_size (entry, g_file_info_get_size (info));
+  
+  /* FIXME: Add additional info.
+     void archive_entry_set_dev(struct archive_entry *, dev_t);
+     void archive_entry_set_devmajor(struct archive_entry *, dev_t);
+     void archive_entry_set_devminor(struct archive_entry *, dev_t);
+     void archive_entry_set_fflags(struct archive_entry *,
+     void archive_entry_set_gid(struct archive_entry *, __LA_INT64_T);
+     void archive_entry_set_gname(struct archive_entry *, const char *);
+     void archive_entry_set_hardlink(struct archive_entry *, const char *);
+     void archive_entry_set_ino64(struct archive_entry *, __LA_INT64_T);
+     void archive_entry_set_link(struct archive_entry *, const char *);
+     void archive_entry_set_mode(struct archive_entry *, __LA_MODE_T);
+     void archive_entry_set_nlink(struct archive_entry *, unsigned int);
+     void archive_entry_set_perm(struct archive_entry *, __LA_MODE_T);
+     void archive_entry_set_rdev(struct archive_entry *, dev_t);
+     void archive_entry_set_rdevmajor(struct archive_entry *, dev_t);
+     void archive_entry_set_rdevminor(struct archive_entry *, dev_t);
+     void archive_entry_set_uid(struct archive_entry *, __LA_INT64_T);
+     void archive_entry_set_uname(struct archive_entry *, const char *);
+  */
 }
 
 static void
@@ -507,7 +939,7 @@ create_file_tree (GVfsBackendArchive *ba, GVfsJob *job)
   int result;
   guint64 entry_index = 0;
 
-  archive = gvfs_archive_new (ba, job);
+  archive = gvfs_archive_read_new (ba, job);
 
   g_assert (ba->files != NULL);
 
@@ -549,6 +981,49 @@ archive_file_free (ArchiveFile *file)
   if (file->info)
     g_object_unref (file->info);
   g_free (file->name);
+}
+
+/* Check whether the file is an archive and determine a format. */
+static gboolean
+determine_archive_format (GVfsBackendArchive *ba, 
+                          GVfsJob            *job)
+{
+  int i;
+  GVfsArchive *archive;
+  struct archive_entry *entry;
+  int result;
+  
+  archive = gvfs_archive_read_new (ba, job);
+  result = gvfs_archive_read_header (archive, &entry);
+  if (result == ARCHIVE_FATAL)
+    {
+      gvfs_archive_free (archive, FALSE);
+      
+      return FALSE;
+    }
+  
+  DEBUG ("determine format %s (%d)\n", 
+         archive_format_name (archive->archive),
+         archive_format (archive->archive));
+  
+  ba->format = archive_format (archive->archive);
+  ba->filters_count = archive_filter_count (archive->archive);
+  ba->filters = g_slice_alloc (
+                  archive_filter_count (archive->archive) * sizeof (int));
+  for (i = 0; i < ba->filters_count; ++i)
+  {
+    ba->filters[i] = archive_filter_code (archive->archive, i);
+    
+    DEBUG ("determine filter %s (%d)\n", 
+           archive_filter_name (archive->archive, i),  
+           ba->filters[i]);
+  }
+
+  /* FIXME: Determine an archive options too. */
+  
+  gvfs_archive_free (archive, FALSE);
+
+  return TRUE;
 }
 
 static void
@@ -614,8 +1089,22 @@ do_mount (GVfsBackend *backend,
                         _("Invalid mount spec"));
       return;
     }
-
-  /* FIXME: check if this file is an archive */
+  
+  /* Check whether the file is an archive and determine a format. */
+  archive->filters_count = 0;
+  archive->filters = NULL;
+  archive->format = ARCHIVE_FORMAT_EMPTY;
+  if (!determine_archive_format (archive, G_VFS_JOB (job)))
+    {
+      g_vfs_job_failed (G_VFS_JOB (job),
+                        G_IO_ERROR,
+                        G_IO_ERROR_NOT_MOUNTABLE_FILE,
+                        _("File cannot be mounted"));
+                        
+      g_object_unref (info);
+      
+      return;
+    }
   
   filename = g_file_get_uri (archive->file);
   DEBUG ("mounted %s\n", filename);
@@ -647,6 +1136,11 @@ backend_unmount (GVfsBackendArchive *ba)
     {
       archive_file_free (ba->files);
       ba->files = NULL;
+    }
+  if (ba->filters)
+    {
+      g_slice_free1 (ba->filters_count * sizeof (int), ba->filters);
+      ba->filters = NULL;
     }
 }
 
@@ -691,7 +1185,7 @@ do_open_for_read (GVfsBackend *       backend,
       return;
     }
   
-  archive = gvfs_archive_new (ba, G_VFS_JOB (job));
+  archive = gvfs_archive_read_new (ba, G_VFS_JOB (job));
 
   do
     {
@@ -729,6 +1223,7 @@ do_open_for_read (GVfsBackend *       backend,
 			   G_IO_ERROR_NOT_FOUND,
 			   _("File doesn't exist"));
     }
+
   gvfs_archive_finish (archive);
 }
 
@@ -760,6 +1255,473 @@ do_read (GVfsBackend *backend,
   else
     gvfs_archive_set_error_from_errno (archive);
   gvfs_archive_pop_job (archive);
+}
+
+/* Push a file into the archive. */
+static void
+do_push (GVfsBackend          *backend,
+         GVfsJobPush          *job,
+         const char           *destination,
+         const char           *source,
+         GFileCopyFlags        flags,
+         gboolean              remove_source,
+         GFileProgressCallback progress_callback,
+         gpointer              progress_callback_data)
+{
+  GVfsBackendArchive *ba = G_VFS_BACKEND_ARCHIVE (backend);
+  GVfsArchive *archive;
+  ArchiveFile *archive_file;
+  struct archive_entry *entry;
+  GFile *file;
+  GFileInfo *info;
+  GFileType type;
+  GFileInputStream *stream;
+  ssize_t read_bytes;
+  ssize_t write_bytes;
+  ssize_t size;
+  ssize_t copied;
+  gboolean is_dir;
+  
+  DEBUG ("push %s to %s\n", source, destination);
+  
+  /* Check whether the source file exists. */
+  if (!g_file_test (source, G_FILE_TEST_EXISTS))
+    {
+      g_vfs_job_failed (G_VFS_JOB (job),
+                        G_IO_ERROR,
+                        G_IO_ERROR_NOT_FOUND,
+                        _("File doesn't exist"));
+      return;
+    }
+  
+  /* Check for possible errors. */
+  archive_file = archive_file_find (ba, destination);
+  is_dir = g_file_test (source, G_FILE_TEST_IS_DIR);
+  if (archive_file == NULL)
+    {
+      if (is_dir)
+        {
+          g_vfs_job_failed (G_VFS_JOB (job), 
+                            G_IO_ERROR,
+                            G_IO_ERROR_WOULD_RECURSE,
+                            _("Can't recursively copy directory"));
+          return;
+        }
+    }
+  else
+    {
+      type = g_file_info_get_file_type (archive_file->info);
+      if (flags & G_FILE_COPY_OVERWRITE)
+        {
+          if (is_dir)
+            {
+              if (type == G_FILE_TYPE_DIRECTORY)
+                {
+                  g_vfs_job_failed (G_VFS_JOB (job), 
+                                    G_IO_ERROR,
+                                    G_IO_ERROR_WOULD_MERGE,
+                                   _("Can't copy directory over directory"));
+                  return;
+                }
+              else
+                {
+                  g_vfs_job_failed (G_VFS_JOB (job), 
+                                    G_IO_ERROR,
+                                    G_IO_ERROR_WOULD_RECURSE,
+                                    _("Can't recursively copy directory"));
+                  return;
+                }
+            }
+        }
+      else
+        {
+          g_vfs_job_failed (G_VFS_JOB (job), 
+                            G_IO_ERROR,
+                            G_IO_ERROR_EXISTS,
+                            _("Target file already exists"));
+          return;
+        }
+    }
+  
+  if (!(flags & G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS))
+    g_warning ("FIXME: follow symlinks");
+  
+  /* Copy the whole archive except the overwritten file. */
+  archive = gvfs_archive_readwrite_new (ba, G_VFS_JOB (job));
+  entry = gvfs_archive_copy_prefix (archive, destination + 1, NULL);
+  while (entry != NULL)
+    {
+      archive_read_data_skip (archive->archive);
+      
+      entry = gvfs_archive_copy_prefix (archive, destination + 1, NULL);
+    }
+  
+  if (gvfs_archive_in_error (archive))
+    {
+      gvfs_archive_finish (archive);
+      
+      return;
+    }
+  
+  /* Add the new file into the archive. */
+  file = g_file_new_for_path (source);
+  info = g_file_query_info (file,
+                            "*",
+                            G_FILE_QUERY_INFO_NONE,
+                            archive->job->cancellable,
+                            &archive->error);
+  if (gvfs_archive_in_error (archive))
+    {
+      g_object_unref (file);
+      gvfs_archive_finish (archive);
+      
+      return;
+    }
+  
+  stream = g_file_read (file, G_VFS_JOB (job)->cancellable, &archive->error);  
+  entry = archive_entry_new ();
+  archive_entry_set_info (entry, destination + 1, info);
+  gvfs_archive_write_header (archive, entry);
+  
+  size = archive_entry_size (entry);
+  copied = 0;
+  progress_callback (copied, size, progress_callback_data);
+  do
+    {
+      read_bytes = g_input_stream_read (G_INPUT_STREAM (stream),
+                                        archive->data,
+                                        sizeof (archive->data),
+                                        archive->job->cancellable,
+                                        &archive->error);
+      write_bytes = gvfs_archive_write_data (archive, 
+                                             archive->data, 
+                                             read_bytes);
+      
+      copied += read_bytes;
+      progress_callback (copied, size, progress_callback_data);
+    }
+  while (read_bytes > 0);
+  
+  if (!gvfs_archive_in_error (archive))
+    {
+      /* Add the new file into the file tree. */
+      archive_file = archive_file_get_from_path (ba->files, 
+                                                 destination + 1, 
+                                                 TRUE);
+      if (archive_file->info != NULL)
+        g_object_unref (archive_file->info);
+      archive_file->info = info;
+      
+      /* Remove source file if necessary. */
+      if (remove_source)
+        g_file_delete (file,
+                       archive->job->cancellable,
+                       &archive->error);
+    }
+  
+  archive_entry_free (entry);
+  g_object_unref (stream);
+  g_object_unref (file);  
+  gvfs_archive_finish (archive);
+}
+
+/* Rename a file in the archive. */
+static void
+do_set_display_name (GVfsBackend           *backend,
+                     GVfsJobSetDisplayName *job,
+                     const char            *pathname,
+                     const char            *display_name)
+{
+  GVfsBackendArchive *ba = G_VFS_BACKEND_ARCHIVE (backend);
+  GVfsArchive *archive;
+  struct archive_entry *entry;
+  ArchiveFile *file;
+  const char *pathname_entry;
+  char *pathname_new;
+  char *name;
+  
+  DEBUG ("rename %s to %s\n", pathname, display_name);
+  
+  /* Check whether the source file exists. */
+  file = archive_file_find (ba, pathname);
+  if (file == NULL)
+    {
+      g_vfs_job_failed (G_VFS_JOB (job),
+                        G_IO_ERROR,
+                        G_IO_ERROR_NOT_FOUND,
+                        _("File doesn't exist"));
+      return;
+    }
+  
+  /* Create a new pathname. */
+  name = g_path_get_dirname (pathname);
+  pathname_new = g_build_filename (name, display_name, NULL);
+  g_free (name); 
+  
+  /* Check whether the destination file does not exists. */
+  if (archive_file_find (ba, pathname_new) != NULL)
+    {
+      g_vfs_job_failed (G_VFS_JOB (job),
+                        G_IO_ERROR,
+                        G_IO_ERROR_EXISTS,
+                        _("Target file already exists"));
+      g_free (pathname_new);
+      return; 
+    }
+  
+  /* Change the name in the archive file. */
+  archive = gvfs_archive_readwrite_new (ba, G_VFS_JOB (job));
+  entry = gvfs_archive_copy_prefix (archive, pathname + 1, NULL);
+  while (entry != NULL)
+    {
+      pathname_entry = archive_entry_pathname (entry);
+      
+      /* Change the name in the archive entry. */
+      name = g_build_filename (pathname_new + 1, 
+                               pathname_entry + strlen (pathname) - 1, 
+                               NULL);
+      archive_entry_set_pathname (entry, name);
+      g_free (name);
+
+      /* Write the header and data. */
+      gvfs_archive_write_header (archive, entry);
+      gvfs_archive_copy_data (archive);
+      
+      entry = gvfs_archive_copy_prefix (archive, pathname + 1, NULL);
+    }
+  
+  if (!gvfs_archive_in_error (archive))
+    {
+      /* Change the name in the file tree. */
+      g_free (file->name);
+      file->name = g_strdup (display_name);
+      g_file_info_set_name (file->info, display_name);
+      gvfs_file_info_populate_default (file->info,
+                                       file->name,
+                                       g_file_info_get_file_type (file->info));
+      g_vfs_job_set_display_name_set_new_path (job, pathname_new);
+    }
+  
+  g_free (pathname_new);
+  gvfs_archive_finish (archive);  
+}
+
+/* Move a file in the archive. */
+static void
+do_move (GVfsBackend *backend,
+         GVfsJobMove *job,
+         const char *source,
+         const char *destination,
+         GFileCopyFlags flags,
+         GFileProgressCallback progress_callback,
+         gpointer progress_callback_data)
+{
+  GVfsBackendArchive *ba = G_VFS_BACKEND_ARCHIVE (backend);
+  GVfsArchive *archive;
+  ArchiveFile *destination_file;
+  ArchiveFile *source_file;
+  struct archive_entry *entry;
+  const char *pathname;
+  char *name;
+  
+  DEBUG ("move %s to %s\n", source, destination);
+  
+  /* Check whether the source file exists. */
+  source_file = archive_file_find (ba, source);
+  if (source_file == NULL)
+    {
+      g_vfs_job_failed (G_VFS_JOB (job),
+                        G_IO_ERROR,
+                        G_IO_ERROR_NOT_FOUND,
+                        _("File doesn't exist"));
+      return;
+    }
+  
+  /* Check whether the destination file does not exists. */
+  destination_file = archive_file_find (ba, destination);
+  if (destination_file != NULL)
+    {
+      if (flags & G_FILE_COPY_OVERWRITE)
+        {
+          if ((g_file_info_get_file_type (source_file->info) 
+                 == G_FILE_TYPE_DIRECTORY) && 
+              (g_file_info_get_file_type (destination_file->info) 
+                 == G_FILE_TYPE_DIRECTORY))
+            {
+                  g_vfs_job_failed (G_VFS_JOB (job), 
+                                    G_IO_ERROR,
+                                    G_IO_ERROR_WOULD_MERGE,
+                                    _("Can't move directory over directory"));
+                  return;
+            }
+        }
+      else
+        {
+          g_vfs_job_failed (G_VFS_JOB (job), 
+                            G_IO_ERROR,
+                            G_IO_ERROR_EXISTS,
+                            _("Target file already exists"));
+          return;
+        }  
+    }
+
+  if (!(flags & G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS))
+    g_warning ("FIXME: follow symlinks");
+
+  /* Move the file in the archive. */
+  archive = gvfs_archive_readwrite_new (ba, G_VFS_JOB (job));
+  entry = gvfs_archive_copy_prefix (archive, destination + 1, source + 1);
+  while (entry != NULL)
+    {
+      pathname = archive_entry_pathname (entry);
+      if (g_str_has_prefix (pathname, source + 1))
+        {
+          /* Change the name in the archive entry. */
+          name = g_build_filename (destination + 1, 
+                                   pathname + strlen (source) - 1, 
+                                   NULL);
+          archive_entry_set_pathname (entry, name);
+          g_free (name);
+          
+          /* Write the header and data. */
+          gvfs_archive_write_header (archive, entry);
+          gvfs_archive_copy_data (archive);
+        }
+      else
+        archive_read_data_skip (archive->archive);
+      
+      entry = gvfs_archive_copy_prefix (archive, destination + 1, source + 1);
+    }
+  
+  if (!gvfs_archive_in_error (archive))
+    {
+      /* Move the file in the file tree. */
+      if (destination_file == NULL)
+        destination_file = archive_file_get_from_path (ba->files, 
+                                                       destination + 1, 
+                                                       TRUE);
+      source_file->parent->children = 
+        g_slist_remove (source_file->parent->children, source_file);
+      destination_file->parent->children = 
+        g_slist_remove (destination_file->parent->children, destination_file);
+      destination_file->parent->children = 
+        g_slist_append (destination_file->parent->children, source_file);
+      source_file->parent = destination_file->parent;
+      archive_file_free (destination_file);
+      
+      /* Set correct info. */
+      g_free (source_file->name);
+      source_file->name = g_path_get_basename (destination);
+      g_file_info_set_name (source_file->info, source_file->name);
+      gvfs_file_info_populate_default (source_file->info,
+        source_file->name,
+        g_file_info_get_file_type (source_file->info));
+    }
+  
+  gvfs_archive_finish (archive);
+}
+
+/* Delete a file in the archive. */
+static void
+do_delete (GVfsBackend   *backend,
+           GVfsJobDelete *job,
+           const char    *pathname)
+{
+  GVfsBackendArchive *ba = G_VFS_BACKEND_ARCHIVE (backend);
+  GVfsArchive *archive;
+  struct archive_entry *entry;
+  ArchiveFile *file;
+  
+  DEBUG ("delete %s\n", pathname);
+  
+  /* Check whether the source file exists. */
+  file = archive_file_find (ba, pathname);
+  if (file == NULL)
+    {
+      g_vfs_job_failed (G_VFS_JOB (job),
+                        G_IO_ERROR,
+                        G_IO_ERROR_NOT_FOUND,
+                        _("File doesn't exist"));
+      return;
+    }
+  
+  /* Delete the file from the archive file. */
+  archive = gvfs_archive_readwrite_new (ba, G_VFS_JOB (job));
+  entry = gvfs_archive_copy_prefix (archive, pathname + 1, NULL);
+  while (entry != NULL)
+    {
+      archive_read_data_skip (archive->archive);
+      
+      entry = gvfs_archive_copy_prefix (archive, pathname + 1, NULL);
+    }
+  
+  if (!gvfs_archive_in_error (archive))
+    {
+      /* Delete the file from the file tree. */
+      file->parent->children = g_slist_remove (file->parent->children, file);
+      archive_file_free (file);
+    }
+  
+  gvfs_archive_finish (archive);  
+}
+
+/* Make a directory in the archive. */
+static void
+do_make_directory (GVfsBackend          *backend,
+                   GVfsJobMakeDirectory *job,
+                   const char           *pathname)
+{
+  GVfsBackendArchive *ba = G_VFS_BACKEND_ARCHIVE (backend);
+  GVfsArchive *archive;
+  struct archive_entry *entry;
+  ArchiveFile *file;
+  GFileInfo *info;
+  char *basename;
+  
+  DEBUG ("make a directory %s\n", pathname);
+  
+  /* Check whether the destination file does not exists. */
+  if (archive_file_find (ba, pathname) != NULL)
+    {
+      g_vfs_job_failed (G_VFS_JOB (job),
+                        G_IO_ERROR,
+                        G_IO_ERROR_EXISTS,
+                        _("File already exists"));
+      return; 
+    }
+  
+  /* Copy the whole archive. */
+  archive = gvfs_archive_readwrite_new (ba, G_VFS_JOB (job));
+  gvfs_archive_copy (archive);
+  
+  /* Create info for the new file. */
+  info = g_file_info_new ();
+  g_file_info_set_file_type (info, G_FILE_TYPE_DIRECTORY);
+  basename = g_path_get_basename (pathname);
+  g_file_info_set_name (info, basename);
+  g_free (basename);
+  
+  /* Add the directory into the archive. */
+  entry = archive_entry_new ();
+  archive_entry_set_info (entry, pathname + 1, info);
+  gvfs_archive_write_header (archive, entry);
+  
+  if (!gvfs_archive_in_error (archive))
+    {
+      /* Add the file into the file tree. */
+      file = archive_file_get_from_path (ba->files, 
+                                         pathname + 1, 
+                                         TRUE);
+      file->info = info;
+      gvfs_file_info_populate_default (info,
+                                       file->name,
+                                       G_FILE_TYPE_DIRECTORY);
+    }
+  else
+    g_object_unref (info);
+  
+  archive_entry_free (entry);
+  gvfs_archive_finish (archive);  
 }
 
 static void
@@ -842,7 +1804,7 @@ try_query_fs_info (GVfsBackend *backend,
                    GFileInfo *info,
                    GFileAttributeMatcher *attribute_matcher)
 {
-  g_file_info_set_attribute_boolean (info, G_FILE_ATTRIBUTE_FILESYSTEM_READONLY, TRUE);
+  g_file_info_set_attribute_boolean (info, G_FILE_ATTRIBUTE_FILESYSTEM_READONLY, FALSE); 
   g_file_info_set_attribute_uint32 (info, G_FILE_ATTRIBUTE_FILESYSTEM_USE_PREVIEW, G_FILESYSTEM_PREVIEW_TYPE_IF_LOCAL);
   g_vfs_job_succeeded (G_VFS_JOB (job));
   return TRUE;
@@ -864,4 +1826,9 @@ g_vfs_backend_archive_class_init (GVfsBackendArchiveClass *klass)
   backend_class->enumerate = do_enumerate;
   backend_class->query_info = do_query_info;
   backend_class->try_query_fs_info = try_query_fs_info;
+  backend_class->push = do_push;
+  backend_class->set_display_name = do_set_display_name;
+  backend_class->delete = do_delete;
+  backend_class->make_directory = do_make_directory;
+  backend_class->move = do_move;
 }
