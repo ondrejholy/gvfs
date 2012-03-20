@@ -130,6 +130,7 @@ gvfs_archive_seek (struct archive *archive,
 {
   GVfsArchive *d = data;
   GSeekType g_whence;
+  gboolean result;
 
   switch (whence)
     {
@@ -143,27 +144,30 @@ gvfs_archive_seek (struct archive *archive,
         g_whence = G_SEEK_END;
         break;
       default:
-        return 0;
+        return ARCHIVE_FATAL;
     }
     
   if (g_seekable_can_seek (G_SEEKABLE (d->stream)))
-    g_seekable_seek (G_SEEKABLE (d->stream),
-		     request,
-		     g_whence,
-		     d->job->cancellable,
-		     &d->error);
-  else
-    return 0;
-
-  if (d->error)
     {
-      g_clear_error (&d->error);
-      request = 0;
+      result = g_seekable_seek (G_SEEKABLE (d->stream),
+                                request,
+                                g_whence,
+                                d->job->cancellable,
+                                &d->error);
+      if (!result)
+        {
+          g_clear_error (&d->error);
+          
+          return ARCHIVE_FATAL;
+        }
     }
+  else
+    return ARCHIVE_FATAL;
+  
   DEBUG ("SEEK %d (%d)\n", (int) request,
       (int) g_seekable_tell (G_SEEKABLE (d->stream)));
 
-  return request;
+  return g_seekable_tell (G_SEEKABLE (d->stream));
 }
 
 /* Skip in the archive input stream (a libarchive callback). */
@@ -172,7 +176,10 @@ gvfs_archive_skip (struct archive *archive,
 		   void           *data,
 		   off_t           request)
 {
-  return gvfs_archive_seek (archive, data, request, SEEK_CUR);
+  if (gvfs_archive_seek (archive, data, request, SEEK_CUR) < ARCHIVE_OK)
+    return 0;
+  
+  return request;
 }
 
 static int
