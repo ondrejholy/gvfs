@@ -386,6 +386,7 @@ gvfs_archive_read_new (GVfsBackendArchive *ba,
   d->temp_file = NULL;
   d->temp_stream = NULL;
   d->temp_archive = NULL;
+  d->error = NULL;
   
   d->archive = archive_read_new ();
   archive_read_support_compression_all (d->archive);
@@ -572,6 +573,15 @@ gvfs_archive_copy_data (GVfsArchive *archive)
         archive->error = g_error_new_literal (G_IO_ERROR, 
                            G_IO_ERROR_FAILED, 
                            _("An archive entry size have not been set."));
+
+      if (g_vfs_job_is_cancelled (archive->job) && 
+          !gvfs_archive_in_error (archive))
+        {
+          archive->error = g_error_new_literal (G_IO_ERROR,
+                                                G_IO_ERROR_CANCELLED,
+                                                _("Operation was cancelled"));
+          break;
+        }
     }
   while (read_bytes > 0);
 }
@@ -1429,6 +1439,15 @@ do_push (GVfsBackend          *backend,
       
       copied += read_bytes;
       progress_callback (copied, size, progress_callback_data);
+      
+      if (g_vfs_job_is_cancelled (archive->job) && 
+          !gvfs_archive_in_error (archive))
+        {
+          archive->error = g_error_new_literal (G_IO_ERROR,
+                                                G_IO_ERROR_CANCELLED,
+                                                _("Operation was cancelled"));
+          break;
+        }
     }
   while (read_bytes > 0);
   
