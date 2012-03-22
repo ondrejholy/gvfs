@@ -105,6 +105,9 @@ typedef struct
   GError *              error;          /* The error of the archive. */
 } GVfsArchive;
 
+/* Tell whether the archive is in error. */
+#define gvfs_archive_in_error(archive) ((archive)->error != NULL)
+
 /* Open the archive input stream (a libarchive callback). */
 static int
 gvfs_archive_read_open (struct archive *archive, 
@@ -171,6 +174,9 @@ gvfs_archive_write (struct archive *archive,
 {
   GVfsArchive *d = data;
   gssize write_bytes;
+  
+  if (gvfs_archive_in_error (d))
+    return -1;
   
   write_bytes = g_output_stream_write (G_OUTPUT_STREAM (d->temp_stream),
                                        buffer,
@@ -275,9 +281,6 @@ gvfs_archive_write_close (struct archive *archive,
   return ARCHIVE_OK;
 }
 
-/* Tell whether the archive is in error. */
-#define gvfs_archive_in_error(archive) ((archive)->error != NULL)
-
 /* Set an error from the archive error. */
 static void
 gvfs_archive_set_error_from_errno (GVfsArchive *archive)
@@ -353,10 +356,10 @@ gvfs_archive_free (GVfsArchive *archive,
         }
       else
         g_file_delete (archive->temp_file, 
-                       archive->job->cancellable, 
-                       &archive->error);
-     } 
- 
+                       NULL, 
+                       NULL);
+    } 
+  
   if (archive->archive != NULL)
     archive_read_free (archive->archive);
  
