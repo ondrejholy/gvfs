@@ -88,7 +88,7 @@ static void backend_unmount (GVfsBackendArchive *ba);
 
 /*** AN ARCHIVE WE CAN OPERATE ON ***/
 
-#define BLOCKSIZE 1024                  /* The size of the copy buffers. */
+#define BLOCKSIZE 10240                 /* The size of the copy buffers. */
 
 typedef struct 
 {
