@@ -460,6 +460,7 @@ gvfs_archive_readwrite_new (GVfsBackendArchive *ba,
   for (i = 0; i < ba->filters_count; ++i)
     archive_write_add_filter (d->temp_archive, ba->filters[i]);
   archive_write_set_bytes_in_last_block (d->temp_archive, 1);
+  archive_write_set_options (d->temp_archive, "compression-level=9");
   
   result = archive_write_open (d->temp_archive,
                                d,
