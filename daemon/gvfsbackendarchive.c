@@ -1580,7 +1580,8 @@ do_push (GVfsBackend          *backend,
   
   size = archive_entry_size (entry);
   copied = 0;
-  progress_callback (copied, size, progress_callback_data);
+  if (progress_callback != NULL)
+    progress_callback (copied, size, progress_callback_data);
   do
     {
       read_bytes = g_input_stream_read (G_INPUT_STREAM (stream),
@@ -1593,7 +1594,8 @@ do_push (GVfsBackend          *backend,
                                              read_bytes);
       
       copied += read_bytes;
-      progress_callback (copied, size, progress_callback_data);
+      if (progress_callback != NULL)
+        progress_callback (copied, size, progress_callback_data);
       
       if (g_vfs_job_is_cancelled (archive->job) && 
           !gvfs_archive_in_error (archive))
