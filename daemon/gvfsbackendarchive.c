@@ -28,6 +28,7 @@
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include <gio/gio.h>
 #include <glib/gstdio.h>
 #include <glib/gi18n.h>
 #include <string.h>
@@ -82,6 +83,9 @@ struct _GVfsBackendArchive
   int *                 filters;        /* The filters of the archive. */
   
   gboolean              writable;       /* Can libarchive write this format? */
+  
+  GMutex *              write_lock;     /* The mutex to lock during changes. */
+  GMutex *              read_lock;      /* The mutex to lock during reading. */
 };
 
 G_DEFINE_TYPE (GVfsBackendArchive, g_vfs_backend_archive, G_VFS_TYPE_BACKEND)
@@ -1295,6 +1299,9 @@ do_mount (GVfsBackend *backend,
         }
     }
   
+  archive->write_lock = g_mutex_new ();
+  archive->read_lock = g_mutex_new ();
+  
   filename = g_file_get_uri (archive->file);
   DEBUG ("mounted %s\n", filename);
   s = g_uri_escape_string (filename, NULL, FALSE);
@@ -1337,6 +1344,16 @@ backend_unmount (GVfsBackendArchive *ba)
       g_slice_free1 (ba->filters_count * sizeof (int), ba->filters);
       ba->filters = NULL;
     }
+  if (ba->read_lock)
+    {
+      g_mutex_free (ba->read_lock);
+      ba->read_lock = NULL;
+    }
+  if (ba->write_lock)
+    {
+      g_mutex_free (ba->write_lock);
+      ba->write_lock = NULL;
+    }
 }
 
 static void
@@ -1362,6 +1379,8 @@ do_open_for_read (GVfsBackend *       backend,
   ArchiveFile *file;
   const char *entry_pathname;
 
+  g_mutex_lock (ba->read_lock);
+  
   file = archive_file_find (ba, filename);
   if (file == NULL)
     {
@@ -1369,6 +1388,8 @@ do_open_for_read (GVfsBackend *       backend,
 		        G_IO_ERROR,
 			G_IO_ERROR_NOT_FOUND,
 			_("File doesn't exist"));
+      g_mutex_unlock (ba->read_lock);
+      
       return;
     }
 
@@ -1377,8 +1398,12 @@ do_open_for_read (GVfsBackend *       backend,
       g_vfs_job_failed (G_VFS_JOB (job), G_IO_ERROR,
 			G_IO_ERROR_IS_DIRECTORY,
 			_("Can't open directory"));
+      g_mutex_unlock (ba->read_lock);
+      
       return;
     }
+  
+  g_mutex_unlock (ba->read_lock);
   
   archive = gvfs_archive_read_new (ba, G_VFS_JOB (job));
 
@@ -1478,6 +1503,16 @@ do_push (GVfsBackend          *backend,
   
   DEBUG ("push %s to %s\n", source, destination);
   
+  /* Lock backend for write. */
+  if (!g_mutex_trylock (ba->write_lock))
+    {
+      g_vfs_job_failed (G_VFS_JOB (job), 
+                        G_IO_ERROR,
+                        G_IO_ERROR_BUSY,
+                        _("Can't do multiple write operations"));
+      return;
+    }
+  
   /* Check for possible errors. */
   if (g_file_test (source, G_FILE_TEST_IS_DIR))
     {
@@ -1485,6 +1520,8 @@ do_push (GVfsBackend          *backend,
                         G_IO_ERROR,
                         G_IO_ERROR_WOULD_RECURSE,
                         _("Can't recursively copy directory"));
+      g_mutex_unlock (ba->write_lock);
+      
       return;
     }
   
@@ -1500,6 +1537,8 @@ do_push (GVfsBackend          *backend,
                                   G_IO_ERROR,
                                   G_IO_ERROR_WOULD_MERGE,
                                  _("Can't copy file over directory"));
+                g_mutex_unlock (ba->write_lock);
+                
                 return;
               }
         }
@@ -1509,6 +1548,8 @@ do_push (GVfsBackend          *backend,
                             G_IO_ERROR,
                             G_IO_ERROR_EXISTS,
                             _("Target file already exists"));
+          g_mutex_unlock (ba->write_lock);
+          
           return;
         }
     }
@@ -1529,6 +1570,7 @@ do_push (GVfsBackend          *backend,
   if (gvfs_archive_in_error (archive))
     {
       gvfs_archive_finish (archive);
+      g_mutex_unlock (ba->write_lock);
       
       return;
     }
@@ -1544,6 +1586,7 @@ do_push (GVfsBackend          *backend,
     {
       g_object_unref (file);
       gvfs_archive_finish (archive);
+      g_mutex_unlock (ba->write_lock);
       
       return;
     }
@@ -1553,6 +1596,7 @@ do_push (GVfsBackend          *backend,
     {
       g_object_unref (file);
       gvfs_archive_finish (archive);
+      g_mutex_unlock (ba->write_lock);
       
       return;
     }
@@ -1594,12 +1638,16 @@ do_push (GVfsBackend          *backend,
   if (!gvfs_archive_in_error (archive))
     {
       /* Add the new file into the file tree. */
+      g_mutex_lock (ba->read_lock);
+      
       archive_file = archive_file_get_from_path (ba->files, 
                                                  destination + 1, 
                                                  TRUE);
       if (archive_file->info != NULL)
         g_object_unref (archive_file->info);
       archive_file->info = info;
+      
+      g_mutex_unlock (ba->read_lock);
       
       /* Remove source file if necessary. */
       if (remove_source)
@@ -1608,6 +1656,7 @@ do_push (GVfsBackend          *backend,
                        &archive->error);
     }
   
+  g_mutex_unlock (ba->write_lock);
   archive_entry_free (entry);
   g_object_unref (stream);
   g_object_unref (file);  
@@ -1631,6 +1680,16 @@ do_set_display_name (GVfsBackend           *backend,
   
   DEBUG ("rename %s to %s\n", pathname, display_name);
   
+  /* Lock backend for write. */
+  if (!g_mutex_trylock (ba->write_lock))
+    {
+      g_vfs_job_failed (G_VFS_JOB (job), 
+                        G_IO_ERROR,
+                        G_IO_ERROR_BUSY,
+                        _("Can't do multiple write operations"));
+      return;
+    }
+  
   /* Check if a request is for rename and not for move. */
   if (g_strrstr (display_name, "/") != NULL)
     {
@@ -1638,6 +1697,8 @@ do_set_display_name (GVfsBackend           *backend,
                         G_IO_ERROR,
                         G_IO_ERROR_INVALID_FILENAME,
                         _("Filename is invalid"));
+      g_mutex_unlock (ba->write_lock);
+      
       return;
     }  
   
@@ -1649,6 +1710,8 @@ do_set_display_name (GVfsBackend           *backend,
                         G_IO_ERROR,
                         G_IO_ERROR_NOT_FOUND,
                         _("File doesn't exist"));
+      g_mutex_unlock (ba->write_lock);
+      
       return;
     }
   
@@ -1665,6 +1728,8 @@ do_set_display_name (GVfsBackend           *backend,
                         G_IO_ERROR_EXISTS,
                         _("Target file already exists"));
       g_free (pathname_new);
+      g_mutex_unlock (ba->write_lock);
+      
       return; 
     }
   
@@ -1692,6 +1757,8 @@ do_set_display_name (GVfsBackend           *backend,
   if (!gvfs_archive_in_error (archive))
     {
       /* Change the name in the file tree. */
+      g_mutex_lock (ba->read_lock);
+      
       g_free (file->name);
       file->name = g_strdup (display_name);
       g_file_info_set_name (file->info, display_name);
@@ -1699,8 +1766,11 @@ do_set_display_name (GVfsBackend           *backend,
                                        file->name,
                                        g_file_info_get_file_type (file->info));
       g_vfs_job_set_display_name_set_new_path (job, pathname_new);
+      
+      g_mutex_unlock (ba->read_lock);
     }
   
+  g_mutex_unlock (ba->write_lock);
   g_free (pathname_new);
   gvfs_archive_finish (archive);  
 }
@@ -1725,6 +1795,16 @@ do_move (GVfsBackend *backend,
   
   DEBUG ("move %s to %s\n", source, destination);
   
+  /* Lock backend for write. */
+  if (!g_mutex_trylock (ba->write_lock))
+    {
+      g_vfs_job_failed (G_VFS_JOB (job), 
+                        G_IO_ERROR,
+                        G_IO_ERROR_BUSY,
+                        _("Can't do multiple write operations"));
+      return;
+    }
+  
   /* Check whether the source file exists. */
   source_file = archive_file_find (ba, source);
   if (source_file == NULL)
@@ -1733,6 +1813,8 @@ do_move (GVfsBackend *backend,
                         G_IO_ERROR,
                         G_IO_ERROR_NOT_FOUND,
                         _("File doesn't exist"));
+      g_mutex_unlock (ba->write_lock);
+      
       return;
     }
   
@@ -1751,6 +1833,8 @@ do_move (GVfsBackend *backend,
                                     G_IO_ERROR,
                                     G_IO_ERROR_WOULD_MERGE,
                                     _("Can't move directory over directory"));
+                  g_mutex_unlock (ba->write_lock);
+                  
                   return;
             }
         }
@@ -1760,13 +1844,15 @@ do_move (GVfsBackend *backend,
                             G_IO_ERROR,
                             G_IO_ERROR_EXISTS,
                             _("Target file already exists"));
+          g_mutex_unlock (ba->write_lock);
+          
           return;
         }  
     }
 
   if (!(flags & G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS))
     g_warning ("FIXME: follow symlinks");
-
+  
   /* Move the file in the archive. */
   archive = gvfs_archive_readwrite_new (ba, G_VFS_JOB (job));
   entry = gvfs_archive_copy_prefix (archive, destination + 1, source + 1);
@@ -1795,6 +1881,8 @@ do_move (GVfsBackend *backend,
   if (!gvfs_archive_in_error (archive))
     {
       /* Move the file in the file tree. */
+      g_mutex_lock (ba->read_lock);
+      
       if (destination_file == NULL)
         destination_file = archive_file_get_from_path (ba->files, 
                                                        destination + 1, 
@@ -1815,8 +1903,11 @@ do_move (GVfsBackend *backend,
       gvfs_file_info_populate_default (source_file->info,
         source_file->name,
         g_file_info_get_file_type (source_file->info));
+      
+      g_mutex_unlock (ba->read_lock);
     }
   
+  g_mutex_unlock (ba->write_lock);
   gvfs_archive_finish (archive);
 }
 
@@ -1833,6 +1924,16 @@ do_delete (GVfsBackend   *backend,
   
   DEBUG ("delete %s\n", pathname);
   
+  /* Lock backend for write. */
+  if (!g_mutex_trylock (ba->write_lock))
+    {
+      g_vfs_job_failed (G_VFS_JOB (job), 
+                        G_IO_ERROR,
+                        G_IO_ERROR_BUSY,
+                        _("Can't do multiple write operations"));
+      return;
+    }
+  
   /* Check whether the source file exists. */
   file = archive_file_find (ba, pathname);
   if (file == NULL)
@@ -1841,6 +1942,8 @@ do_delete (GVfsBackend   *backend,
                         G_IO_ERROR,
                         G_IO_ERROR_NOT_FOUND,
                         _("File doesn't exist"));
+      g_mutex_unlock (ba->write_lock);
+      
       return;
     }
   
@@ -1857,10 +1960,15 @@ do_delete (GVfsBackend   *backend,
   if (!gvfs_archive_in_error (archive))
     {
       /* Delete the file from the file tree. */
+      g_mutex_lock (ba->read_lock);
+      
       file->parent->children = g_slist_remove (file->parent->children, file);
       archive_file_free (file);
+      
+      g_mutex_unlock (ba->read_lock);
     }
   
+  g_mutex_unlock (ba->write_lock);
   gvfs_archive_finish (archive);  
 }
 
@@ -1879,6 +1987,16 @@ do_make_directory (GVfsBackend          *backend,
   
   DEBUG ("make a directory %s\n", pathname);
   
+  /* Lock backend for write. */
+  if (!g_mutex_trylock (ba->write_lock))
+    {
+      g_vfs_job_failed (G_VFS_JOB (job), 
+                        G_IO_ERROR,
+                        G_IO_ERROR_BUSY,
+                        _("Can't do multiple write operations"));
+      return;
+    }
+  
   /* Check whether the destination file does not exists. */
   if (archive_file_find (ba, pathname) != NULL)
     {
@@ -1886,6 +2004,8 @@ do_make_directory (GVfsBackend          *backend,
                         G_IO_ERROR,
                         G_IO_ERROR_EXISTS,
                         _("File already exists"));
+      g_mutex_unlock (ba->write_lock);
+      
       return; 
     }
   
@@ -1908,6 +2028,8 @@ do_make_directory (GVfsBackend          *backend,
   if (!gvfs_archive_in_error (archive))
     {
       /* Add the file into the file tree. */
+      g_mutex_lock (ba->read_lock);
+      
       file = archive_file_get_from_path (ba->files, 
                                          pathname + 1, 
                                          TRUE);
@@ -1915,10 +2037,12 @@ do_make_directory (GVfsBackend          *backend,
       gvfs_file_info_populate_default (info,
                                        file->name,
                                        G_FILE_TYPE_DIRECTORY);
+      g_mutex_unlock (ba->read_lock);
     }
   else
     g_object_unref (info);
   
+  g_mutex_unlock (ba->write_lock);
   archive_entry_free (entry);
   gvfs_archive_finish (archive);  
 }
@@ -1934,6 +2058,8 @@ do_query_info (GVfsBackend *backend,
   GVfsBackendArchive *ba = G_VFS_BACKEND_ARCHIVE (backend);
   ArchiveFile *file;
 
+  g_mutex_lock (ba->read_lock);
+  
   file = archive_file_find (ba, filename);
   if (file == NULL)
     {
@@ -1941,6 +2067,8 @@ do_query_info (GVfsBackend *backend,
 		        G_IO_ERROR,
 			G_IO_ERROR_NOT_FOUND,
 			_("File doesn't exist"));
+      g_mutex_unlock (ba->read_lock);
+      
       return;
     }
 
@@ -1948,7 +2076,9 @@ do_query_info (GVfsBackend *backend,
     g_warning ("FIXME: follow symlinks");
 
   g_file_info_copy_into (file->info, info);
-
+  
+  g_mutex_unlock (ba->read_lock);
+  
   g_vfs_job_succeeded (G_VFS_JOB (job));
 }
 
@@ -1963,6 +2093,8 @@ do_enumerate (GVfsBackend *backend,
   ArchiveFile *file;
   GSList *walk;
 
+  g_mutex_lock (ba->read_lock);
+  
   file = archive_file_find (ba, filename);
   if (file == NULL)
     {
@@ -1970,6 +2102,8 @@ do_enumerate (GVfsBackend *backend,
 		        G_IO_ERROR,
 			G_IO_ERROR_NOT_FOUND,
 			_("File doesn't exist"));
+      g_mutex_unlock (ba->read_lock);
+      
       return;
     }
 
@@ -1979,6 +2113,8 @@ do_enumerate (GVfsBackend *backend,
 		        G_IO_ERROR,
 			G_IO_ERROR_NOT_DIRECTORY,
 			_("The file is not a directory"));
+      g_mutex_unlock (ba->read_lock);
+      
       return;
     }
 
@@ -1992,7 +2128,9 @@ do_enumerate (GVfsBackend *backend,
       g_object_unref (info);
     }
   g_vfs_job_enumerate_done (job);
-
+  
+  g_mutex_unlock (ba->read_lock);
+  
   g_vfs_job_succeeded (G_VFS_JOB (job));
 }
 
