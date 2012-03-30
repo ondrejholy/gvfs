@@ -80,6 +80,8 @@ struct _GVfsBackendArchive
   int                   format;         /* The format of the archive file. */
   int                   filters_count;  /* The number of the filters. */
   int *                 filters;        /* The filters of the archive. */
+  
+  gboolean              writable;       /* Can libarchive write this format? */
 };
 
 G_DEFINE_TYPE (GVfsBackendArchive, g_vfs_backend_archive, G_VFS_TYPE_BACKEND)
@@ -373,38 +375,6 @@ gvfs_archive_free (GVfsArchive *archive,
 /* Close the archive and pop the job. */
 #define gvfs_archive_finish(archive) gvfs_archive_free ((archive), TRUE);
 
-/* Create a new readonly archive structure. */
-static GVfsArchive *
-gvfs_archive_read_new (GVfsBackendArchive *ba, 
-                       GVfsJob            *job)
-{
-  GVfsArchive *d;
-  
-  d = g_slice_new0 (GVfsArchive);
-
-  gvfs_archive_push_job (d, job);
-  
-  d->file = ba->file;
-  d->stream = NULL;
-  d->temp_file = NULL;
-  d->temp_stream = NULL;
-  d->temp_archive = NULL;
-  d->error = NULL;
-  
-  d->archive = archive_read_new ();
-  archive_read_support_compression_all (d->archive);
-  archive_read_support_format_all (d->archive);
-  archive_read_set_seek_callback (d->archive, gvfs_archive_read_seek);
-  archive_read_open2 (d->archive,
-                      d,
-                      gvfs_archive_read_open,
-                      gvfs_archive_read,
-                      gvfs_archive_read_skip,
-                      gvfs_archive_read_close);
-    
-  return d;
-}
-
 #if ARCHIVE_VERSION_NUMBER < 3000200
 /* Set the filter based on the code. */
 static int
@@ -435,44 +405,114 @@ archive_write_add_filter(struct archive *a, int code)
 }
 #endif
 
-/* Create a new readwrite archive structure. 
-   NB: It assumes the determined archive format by determine_archive_format. */
+/* Create a new readonly archive structure. */
+#define gvfs_archive_read_new(backend, job) \
+  gvfs_archive_new ((backend), (job), TRUE, FALSE)
+
+/* Create a new writeonly archive structure. */
+#define gvfs_archive_write_new(backend, job) \
+  gvfs_archive_new ((backend), (job), FALSE, TRUE)
+
+/* Create a new readwrite archive structure. */
+#define gvfs_archive_readwrite_new(backend, job) \
+  gvfs_archive_new ((backend), (job), TRUE, TRUE)
+
+/* Create a new archive structure. */
 static GVfsArchive *
-gvfs_archive_readwrite_new (GVfsBackendArchive *ba, 
-                            GVfsJob            *job)
+gvfs_archive_new (GVfsBackendArchive *ba, 
+                  GVfsJob            *job,
+                  gboolean            readable,
+                  gboolean            writeable)
 {
   GVfsArchive *d;
   int i;
-  int result;
+  int result = ARCHIVE_OK;
   char *pathname;
-  char *template;
+  char *template;  
   
-  d = gvfs_archive_read_new (ba, job);
+  g_assert (readable || writeable);
   
-  /* Create a temp file. */
-  pathname = g_file_get_path (ba->file);
-  template = g_strconcat (pathname, ".XXXXXX", NULL);
-  /* FIXME: Replace mktemp function by a safer one. */
-  d->temp_file = g_file_new_for_path (mktemp (template));
-  g_free (pathname);
-  g_free (template);
+  d = g_slice_new0 (GVfsArchive);
+  d->file = ba->file;
+  d->stream = NULL;
+  d->archive = NULL;
+  d->temp_file = NULL;
+  d->temp_stream = NULL;
+  d->temp_archive = NULL;
+  d->error = NULL;
   
-  /* Set up a format of the archive. */
-  d->temp_archive = archive_write_new ();
-  archive_write_set_format (d->temp_archive, ba->format);
-  for (i = 0; i < ba->filters_count; ++i)
-    archive_write_add_filter (d->temp_archive, ba->filters[i]);
-  archive_write_set_bytes_in_last_block (d->temp_archive, 1);
-  archive_write_set_options (d->temp_archive, "compression-level=9");
-  
-  result = archive_write_open (d->temp_archive,
-                               d,
-                               gvfs_archive_write_open,
-                               gvfs_archive_write,
-                               gvfs_archive_write_close);
-  if (result < ARCHIVE_OK)
-    gvfs_archive_set_error_from_errno (d);
-  
+  gvfs_archive_push_job (d, job);
+    
+  if (readable)
+    {
+      d->archive = archive_read_new ();
+      archive_read_support_compression_all (d->archive);
+      archive_read_support_format_all (d->archive);
+      archive_read_set_seek_callback (d->archive, gvfs_archive_read_seek);
+      result = archive_read_open2 (d->archive,
+                                   d,
+                                   gvfs_archive_read_open,
+                                   gvfs_archive_read,
+                                   gvfs_archive_read_skip,
+                                   gvfs_archive_read_close);
+      if (result < ARCHIVE_OK)
+        {
+          gvfs_archive_set_error_from_errno (d);
+          
+          return d;
+        }
+    }
+
+  if (writeable)
+    {
+      /* Create a temp file. */
+      pathname = g_file_get_path (ba->file);
+      template = g_strconcat (pathname, ".XXXXXX", NULL);
+      g_free (pathname);
+      close (g_mkstemp (template));
+      d->temp_file = g_file_new_for_path (template);
+      g_free (template);
+      
+      /* Set up a format of the archive. */
+      d->temp_archive = archive_write_new ();
+      result = archive_write_set_format (d->temp_archive, ba->format);
+      if (result != ARCHIVE_OK)
+        {
+          d->error = g_error_new_literal (G_IO_ERROR, 
+                       G_IO_ERROR_FAILED, 
+                       _("An archive format is not writeable."));
+          return d;
+        }
+      
+      /* Add filters of the archive. */
+      for (i = 0; i < ba->filters_count; ++i)
+        {
+          result = archive_write_add_filter (d->temp_archive, ba->filters[i]);
+          if (result != ARCHIVE_OK)
+            {
+              d->error = g_error_new_literal (G_IO_ERROR, 
+                           G_IO_ERROR_FAILED,
+                           _("An archive filter is not writeable."));
+              return d;
+            }
+        }
+      
+      archive_write_set_bytes_in_last_block (d->temp_archive, 1);
+      archive_write_set_options (d->temp_archive, "compression-level=9");
+      
+      result = archive_write_open (d->temp_archive,
+                                   d,
+                                   gvfs_archive_write_open,
+                                   gvfs_archive_write,
+                                   gvfs_archive_write_close);
+      if (result < ARCHIVE_OK)
+        {
+          gvfs_archive_set_error_from_errno (d);
+          
+          return d;
+        }
+    }
+    
   return d;
 }
 
@@ -745,11 +785,19 @@ create_root_file (GVfsBackendArchive *ba)
   g_file_info_set_attribute_string (info, G_FILE_ATTRIBUTE_STANDARD_FAST_CONTENT_TYPE, "inode/directory");
 
   g_file_info_set_attribute_boolean (info, G_FILE_ATTRIBUTE_ACCESS_CAN_READ, TRUE);
-  g_file_info_set_attribute_boolean (info, G_FILE_ATTRIBUTE_ACCESS_CAN_WRITE, TRUE);
-  g_file_info_set_attribute_boolean (info, G_FILE_ATTRIBUTE_ACCESS_CAN_DELETE, TRUE);
-  g_file_info_set_attribute_boolean (info, G_FILE_ATTRIBUTE_ACCESS_CAN_EXECUTE, TRUE);
+  g_file_info_set_attribute_boolean (info, 
+                                     G_FILE_ATTRIBUTE_ACCESS_CAN_WRITE, 
+                                     ba->writable);
+  g_file_info_set_attribute_boolean (info, 
+                                     G_FILE_ATTRIBUTE_ACCESS_CAN_DELETE, 
+                                     ba->writable);
+  g_file_info_set_attribute_boolean (info, 
+                                     G_FILE_ATTRIBUTE_ACCESS_CAN_EXECUTE, 
+                                     ba->writable);
   g_file_info_set_attribute_boolean (info, G_FILE_ATTRIBUTE_ACCESS_CAN_TRASH, FALSE);
-  g_file_info_set_attribute_boolean (info, G_FILE_ATTRIBUTE_ACCESS_CAN_RENAME, TRUE);
+  g_file_info_set_attribute_boolean (info, 
+                                     G_FILE_ATTRIBUTE_ACCESS_CAN_RENAME, 
+                                     ba->writable);
 
   icon = g_themed_icon_new ("folder");
   g_file_info_set_icon (info, icon);
@@ -758,7 +806,8 @@ create_root_file (GVfsBackendArchive *ba)
 
 /* Set archive file info from archive entry info. */
 static void
-archive_file_set_info_from_entry (ArchiveFile *	        file, 
+archive_file_set_info_from_entry (GVfsBackendArchive   *ba,
+                                  ArchiveFile *         file, 
 				  struct archive_entry *entry,
 				  guint64               entry_index)
 {
@@ -823,11 +872,19 @@ archive_file_set_info_from_entry (ArchiveFile *	        file,
                           archive_entry_size (entry));
 
   g_file_info_set_attribute_boolean (info, G_FILE_ATTRIBUTE_ACCESS_CAN_READ, TRUE);
-  g_file_info_set_attribute_boolean (info, G_FILE_ATTRIBUTE_ACCESS_CAN_WRITE, TRUE);
-  g_file_info_set_attribute_boolean (info, G_FILE_ATTRIBUTE_ACCESS_CAN_DELETE, TRUE);
-  g_file_info_set_attribute_boolean (info, G_FILE_ATTRIBUTE_ACCESS_CAN_EXECUTE, TRUE);
+  g_file_info_set_attribute_boolean (info, 
+                                     G_FILE_ATTRIBUTE_ACCESS_CAN_WRITE, 
+                                     ba->writable);
+  g_file_info_set_attribute_boolean (info, 
+                                     G_FILE_ATTRIBUTE_ACCESS_CAN_DELETE, 
+                                     ba->writable);
+  g_file_info_set_attribute_boolean (info, 
+                                     G_FILE_ATTRIBUTE_ACCESS_CAN_EXECUTE, 
+                                     ba->writable);
   g_file_info_set_attribute_boolean (info, G_FILE_ATTRIBUTE_ACCESS_CAN_TRASH, FALSE);
-  g_file_info_set_attribute_boolean (info, G_FILE_ATTRIBUTE_ACCESS_CAN_RENAME, TRUE);
+  g_file_info_set_attribute_boolean (info, 
+                                     G_FILE_ATTRIBUTE_ACCESS_CAN_RENAME, 
+                                     ba->writable);
 
   /* Set inode number to reflect absolute position in the archive. */
   g_file_info_set_attribute_uint64 (info,
@@ -1003,7 +1060,7 @@ create_file_tree (GVfsBackendArchive *ba, GVfsJob *job)
 							  TRUE);
           /* Don't set info for root */
           if (file != ba->files)
-            archive_file_set_info_from_entry (file, entry, entry_index);
+            archive_file_set_info_from_entry (ba, file, entry, entry_index);
 	  archive_read_data_skip (archive->archive);
 	  entry_index++;
 	}
@@ -1066,10 +1123,58 @@ determine_archive_format (GVfsBackendArchive *ba,
   /* FIXME: Determine an archive options too. */
   
   gvfs_archive_free (archive, FALSE);
-
+  
+  /* Check if format is writable. */
+  archive->archive = archive_write_new ();
+  result = archive_write_set_format (archive->archive, ba->format);
+  for (i = 0; i < ba->filters_count && result == ARCHIVE_OK; i++)
+    result = archive_write_add_filter (archive->archive, ba->filters [i]);
+  archive_write_free (archive->archive);
+  
+  if (result != ARCHIVE_OK)
+    ba->writable = FALSE;
+  
+  if (ba->format == ARCHIVE_FORMAT_EMPTY)
+    return FALSE;
+  
   return TRUE;
 }
 
+/* Create an empty archive file. */
+static void
+create_empty_archive (GVfsBackendArchive *ba, 
+                      GVfsJob            *job)
+{
+  GVfsArchive *archive;
+  GFileOutputStream *stream;
+  
+  /* Create an empty file. */
+  stream = g_file_create (ba->file, 
+                          G_FILE_CREATE_NONE, 
+                          job->cancellable, 
+                          &job->error);
+  if (stream == NULL)
+    {
+      g_vfs_job_failed_from_error (G_VFS_JOB (job),
+                                   job->error);
+      return;
+    }
+  else
+    g_object_unref (stream);
+  
+  /* Create an empty archive. */
+  archive = gvfs_archive_write_new (ba, job);
+  if (gvfs_archive_in_error (archive))
+    {
+      g_file_delete (archive->file, 
+                     NULL, 
+                     NULL);
+    }
+  
+  gvfs_archive_finish (archive);
+}
+
+/* Mount an archive file. */
 static void
 do_mount (GVfsBackend *backend,
 	  GVfsJobMount *job,
@@ -1079,9 +1184,11 @@ do_mount (GVfsBackend *backend,
 {
   GVfsBackendArchive *archive = G_VFS_BACKEND_ARCHIVE (backend);
   const char *host, *file;
-  GFileInfo *info;
+  const char *create;
+  const char *format;
+  const char *filters;
   char *filename, *s;
-  GError *error = NULL;
+  char *endptr;
 
   host = g_mount_spec_get (mount_spec, "host");
   file = g_mount_spec_get (mount_spec, "file");
@@ -1112,42 +1219,80 @@ do_mount (GVfsBackend *backend,
     archive->file = g_file_new_for_commandline_arg (file);
   
   DEBUG ("Trying to mount %s\n", g_file_get_uri (archive->file));
-
-  info = g_file_query_info (archive->file,
-			    "*",
-			    G_FILE_QUERY_INFO_NONE,
-			    G_VFS_JOB (job)->cancellable,
-			    &error);
-  if (info == NULL)
-    {
-      g_vfs_job_failed_from_error (G_VFS_JOB (job),
-				   error);
-      g_error_free (error);
-      return;
-    }
-
-  if (g_file_info_get_file_type (info) != G_FILE_TYPE_REGULAR)
-    {
-      g_vfs_job_failed (G_VFS_JOB (job),
-                        G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
-                        _("Invalid mount spec"));
-      return;
-    }
   
-  /* Check whether the file is an archive and determine a format. */
+  archive->writable = TRUE;
+  archive->format = ARCHIVE_FORMAT_EMPTY;
   archive->filters_count = 0;
   archive->filters = NULL;
-  archive->format = ARCHIVE_FORMAT_EMPTY;
-  if (!determine_archive_format (archive, G_VFS_JOB (job)))
+
+  create = g_mount_spec_get (mount_spec, "create");
+  format = g_mount_spec_get (mount_spec, "format");
+  filters = g_mount_spec_get (mount_spec, "filters");
+  if (create != NULL)
     {
-      g_vfs_job_failed (G_VFS_JOB (job),
-                        G_IO_ERROR,
-                        G_IO_ERROR_NOT_MOUNTABLE_FILE,
-                        _("File cannot be mounted"));
-                        
-      g_object_unref (info);
+      if (format == NULL)
+        {
+           g_vfs_job_failed (G_VFS_JOB (job),
+                             G_IO_ERROR,
+                             G_IO_ERROR_INVALID_ARGUMENT,
+                             _("No format specified"));
+           return;
+        }
       
-      return;
+      /* Read a format for the archive. */
+      archive->format = strtol (format, &endptr, 10);
+      if (*endptr != '\0')
+        {
+          g_vfs_job_failed (G_VFS_JOB (job),
+                            G_IO_ERROR, 
+                            G_IO_ERROR_INVALID_ARGUMENT,
+                            _("Invalid format"));
+          return;
+        }
+      
+      if (filters != NULL)
+        {
+          /* Read filters for the new archive. */
+          archive->filters_count = 0;
+          while (*filters != '\0')
+            {
+              archive->filters_count++;
+              archive->filters = g_realloc (archive->filters, 
+                                            archive->filters_count
+                                              * sizeof (int));
+              archive->filters [archive->filters_count - 1] = strtol (filters, 
+                                                                      &endptr, 
+                                                                      10);
+              filters = endptr;
+              if (*filters != '\0')
+                {
+                  if (*filters != ',')
+                    {
+                      g_vfs_job_failed (G_VFS_JOB (job),
+                                        G_IO_ERROR, 
+                                        G_IO_ERROR_INVALID_ARGUMENT,
+                                        _("Invalid filter"));
+                      g_free (archive->filters);
+                      
+                      return;
+                    }
+                  else
+                    filters++;
+                }
+            }
+        }
+    }
+  else
+    {
+      /* Check whether the file is an archive and determine a format. */
+      if (!determine_archive_format (archive, G_VFS_JOB (job)))
+        {
+          g_vfs_job_failed (G_VFS_JOB (job),
+                            G_IO_ERROR,
+                            G_IO_ERROR_NOT_MOUNTABLE_FILE,
+                            _("File cannot be mounted"));
+          return;
+        }
     }
   
   filename = g_file_get_uri (archive->file);
@@ -1158,14 +1303,20 @@ do_mount (GVfsBackend *backend,
   g_free (s);
   g_vfs_backend_set_mount_spec (backend, mount_spec);
   g_mount_spec_unref (mount_spec);
-
-  g_vfs_backend_set_display_name (backend, g_file_info_get_display_name (info));
+  
+  s = g_path_get_basename (filename);
+  g_vfs_backend_set_display_name (backend, s);
+  g_free (s);
 
   g_vfs_backend_set_icon_name (backend, MOUNT_ICON_NAME);
 
   create_root_file (archive);
-  create_file_tree (archive, G_VFS_JOB (job));
-  g_object_unref (info);
+  if (create == NULL)
+    {
+      create_file_tree (archive, G_VFS_JOB (job));
+    }
+  else
+    create_empty_archive (archive, G_VFS_JOB (job));
 }
 
 static void
