@@ -1475,58 +1475,33 @@ do_push (GVfsBackend          *backend,
   ssize_t write_bytes;
   ssize_t size;
   ssize_t copied;
-  gboolean is_dir;
   
   DEBUG ("push %s to %s\n", source, destination);
   
-  /* Check whether the source file exists. */
-  if (!g_file_test (source, G_FILE_TEST_EXISTS))
+  /* Check for possible errors. */
+  if (g_file_test (source, G_FILE_TEST_IS_DIR))
     {
-      g_vfs_job_failed (G_VFS_JOB (job),
+      g_vfs_job_failed (G_VFS_JOB (job), 
                         G_IO_ERROR,
-                        G_IO_ERROR_NOT_FOUND,
-                        _("File doesn't exist"));
+                        G_IO_ERROR_WOULD_RECURSE,
+                        _("Can't recursively copy directory"));
       return;
     }
   
-  /* Check for possible errors. */
   archive_file = archive_file_find (ba, destination);
-  is_dir = g_file_test (source, G_FILE_TEST_IS_DIR);
-  if (archive_file == NULL)
+  if (archive_file != NULL)
     {
-      if (is_dir)
+       if (flags & G_FILE_COPY_OVERWRITE)
         {
-          g_vfs_job_failed (G_VFS_JOB (job), 
-                            G_IO_ERROR,
-                            G_IO_ERROR_WOULD_RECURSE,
-                            _("Can't recursively copy directory"));
-          return;
-        }
-    }
-  else
-    {
-      type = g_file_info_get_file_type (archive_file->info);
-      if (flags & G_FILE_COPY_OVERWRITE)
-        {
-          if (is_dir)
-            {
-              if (type == G_FILE_TYPE_DIRECTORY)
-                {
-                  g_vfs_job_failed (G_VFS_JOB (job), 
-                                    G_IO_ERROR,
-                                    G_IO_ERROR_WOULD_MERGE,
-                                   _("Can't copy directory over directory"));
-                  return;
-                }
-              else
-                {
-                  g_vfs_job_failed (G_VFS_JOB (job), 
-                                    G_IO_ERROR,
-                                    G_IO_ERROR_WOULD_RECURSE,
-                                    _("Can't recursively copy directory"));
-                  return;
-                }
-            }
+           type = g_file_info_get_file_type (archive_file->info);
+           if (type == G_FILE_TYPE_DIRECTORY)
+              {
+                g_vfs_job_failed (G_VFS_JOB (job), 
+                                  G_IO_ERROR,
+                                  G_IO_ERROR_WOULD_MERGE,
+                                 _("Can't copy file over directory"));
+                return;
+              }
         }
       else
         {
@@ -1574,6 +1549,14 @@ do_push (GVfsBackend          *backend,
     }
   
   stream = g_file_read (file, G_VFS_JOB (job)->cancellable, &archive->error);  
+  if (gvfs_archive_in_error (archive))
+    {
+      g_object_unref (file);
+      gvfs_archive_finish (archive);
+      
+      return;
+    }
+  
   entry = archive_entry_new ();
   archive_entry_set_info (entry, destination + 1, info);
   gvfs_archive_write_header (archive, entry);
@@ -1647,6 +1630,16 @@ do_set_display_name (GVfsBackend           *backend,
   char *name;
   
   DEBUG ("rename %s to %s\n", pathname, display_name);
+  
+  /* Check if a request is for rename and not for move. */
+  if (g_strrstr (display_name, "/") != NULL)
+    {
+      g_vfs_job_failed (G_VFS_JOB (job),
+                        G_IO_ERROR,
+                        G_IO_ERROR_INVALID_FILENAME,
+                        _("Filename is invalid"));
+      return;
+    }  
   
   /* Check whether the source file exists. */
   file = archive_file_find (ba, pathname);
