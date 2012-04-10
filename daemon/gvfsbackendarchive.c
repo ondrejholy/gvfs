@@ -1089,12 +1089,13 @@ archive_file_free (ArchiveFile *file)
 }
 
 /* Check whether the file is an archive and determine a format. */
-static gboolean
+static GError *
 determine_archive_format (GVfsBackendArchive *ba, 
                           GVfsJob            *job)
 {
   int i;
   GVfsArchive *archive;
+  GError *error;
   struct archive_entry *entry;
   int result;
   
@@ -1102,9 +1103,12 @@ determine_archive_format (GVfsBackendArchive *ba,
   result = gvfs_archive_read_header (archive, &entry);
   if (result == ARCHIVE_FATAL)
     {
+      error = g_error_new_literal (G_IO_ERROR, 
+                g_io_error_from_errno (archive_errno (archive->archive)), 
+                archive_error_string (archive->archive));
       gvfs_archive_free (archive, FALSE);
       
-      return FALSE;
+      return error;
     }
   
   DEBUG ("determine format %s (%d)\n", 
@@ -1139,9 +1143,11 @@ determine_archive_format (GVfsBackendArchive *ba,
     ba->writable = FALSE;
   
   if (ba->format == ARCHIVE_FORMAT_EMPTY)
-    return FALSE;
+    return g_error_new_literal (G_IO_ERROR, 
+                                G_IO_ERROR_NOT_MOUNTABLE_FILE,
+                                _("Invalid file"));
   
-  return TRUE;
+  return NULL;
 }
 
 /* Create an empty archive file. */
@@ -1187,6 +1193,7 @@ do_mount (GVfsBackend *backend,
 	  gboolean is_automount)
 {
   GVfsBackendArchive *archive = G_VFS_BACKEND_ARCHIVE (backend);
+  GError *error;
   const char *host, *file;
   const char *create;
   const char *format;
@@ -1289,12 +1296,12 @@ do_mount (GVfsBackend *backend,
   else
     {
       /* Check whether the file is an archive and determine a format. */
-      if (!determine_archive_format (archive, G_VFS_JOB (job)))
+      error = determine_archive_format (archive, G_VFS_JOB (job));
+      if (error != NULL)
         {
-          g_vfs_job_failed (G_VFS_JOB (job),
-                            G_IO_ERROR,
-                            G_IO_ERROR_NOT_MOUNTABLE_FILE,
-                            _("File cannot be mounted"));
+          g_vfs_job_failed_from_error (G_VFS_JOB (job), error);
+          g_clear_error (&error);
+          
           return;
         }
     }
