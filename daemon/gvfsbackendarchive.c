@@ -2011,9 +2011,7 @@ do_make_directory (GVfsBackend          *backend,
   GVfsArchive *archive;
   struct archive_entry *entry;
   ArchiveFile *file;
-  GFileInfo *info;
-  char *basename;
-  
+    
   DEBUG ("make a directory %s\n", pathname);
   
   /* Lock backend for write. */
@@ -2042,16 +2040,10 @@ do_make_directory (GVfsBackend          *backend,
   archive = gvfs_archive_readwrite_new (ba, G_VFS_JOB (job));
   gvfs_archive_copy (archive);
   
-  /* Create info for the new file. */
-  info = g_file_info_new ();
-  g_file_info_set_file_type (info, G_FILE_TYPE_DIRECTORY);
-  basename = g_path_get_basename (pathname);
-  g_file_info_set_name (info, basename);
-  g_free (basename);
-  
   /* Add the directory into the archive. */
   entry = archive_entry_new ();
-  archive_entry_set_info (entry, pathname + 1, info);
+  archive_entry_set_filetype (entry, AE_IFDIR);
+  archive_entry_set_pathname (entry, pathname + 1);
   gvfs_archive_write_header (archive, entry);
   
   if (!gvfs_archive_in_error (archive))
@@ -2062,14 +2054,10 @@ do_make_directory (GVfsBackend          *backend,
       file = archive_file_get_from_path (ba->files, 
                                          pathname + 1, 
                                          TRUE);
-      file->info = info;
-      gvfs_file_info_populate_default (info,
-                                       file->name,
-                                       G_FILE_TYPE_DIRECTORY);
+      fixup_dirs (ba->files);
+      
       g_mutex_unlock (ba->read_lock);
     }
-  else
-    g_object_unref (info);
   
   g_mutex_unlock (ba->write_lock);
   archive_entry_free (entry);
