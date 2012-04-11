@@ -1697,17 +1697,28 @@ do_set_display_name (GVfsBackend           *backend,
       return;
     }
   
-  /* Check if a request is for rename and not for move. */
-  if (g_strrstr (display_name, "/") != NULL)
+  /* Check validity of the file name. */
+  if (g_strrstr (display_name, "/") != NULL || strlen (display_name) == 0)
     {
       g_vfs_job_failed (G_VFS_JOB (job),
                         G_IO_ERROR,
-                        G_IO_ERROR_INVALID_FILENAME,
+                        G_IO_ERROR_INVALID_ARGUMENT,
                         _("Filename is invalid"));
       g_mutex_unlock (ba->write_lock);
       
       return;
-    }  
+    }
+  
+  if (strcmp (pathname, "/") == 0)
+    {
+      g_vfs_job_failed (G_VFS_JOB (job),
+                        G_IO_ERROR,
+                        G_IO_ERROR_NOT_SUPPORTED,
+                        _("Operation not supported"));
+      g_mutex_unlock (ba->write_lock);
+      
+      return;
+    }
   
   /* Check whether the source file exists. */
   file = archive_file_find (ba, pathname);
@@ -1725,7 +1736,18 @@ do_set_display_name (GVfsBackend           *backend,
   /* Create a new pathname. */
   name = g_path_get_dirname (pathname);
   pathname_new = g_build_filename (name, display_name, NULL);
-  g_free (name); 
+  g_free (name);
+  
+  /* Pathnames are equal. */
+  if (strcmp (pathname, pathname_new) == 0)
+    {
+      g_vfs_job_set_display_name_set_new_path (job, pathname_new);
+      g_free (pathname_new);
+      g_mutex_unlock (ba->write_lock);
+      g_vfs_job_succeeded (G_VFS_JOB (job));
+      
+      return;
+    }
   
   /* Check whether the destination file does not exists. */
   if (archive_file_find (ba, pathname_new) != NULL)
