@@ -1834,6 +1834,18 @@ do_move (GVfsBackend *backend,
       return;
     }
   
+  /* Check validity of the file name. */
+  if (strcmp (source, "/") == 0)
+    {
+      g_vfs_job_failed (G_VFS_JOB (job),
+                        G_IO_ERROR,
+                        G_IO_ERROR_NOT_SUPPORTED,
+                        _("Operation not supported"));
+      g_mutex_unlock (ba->write_lock);
+      
+      return;
+    }
+  
   /* Check whether the source file exists. */
   source_file = archive_file_find (ba, source);
   if (source_file == NULL)
@@ -1843,6 +1855,15 @@ do_move (GVfsBackend *backend,
                         G_IO_ERROR_NOT_FOUND,
                         _("File doesn't exist"));
       g_mutex_unlock (ba->write_lock);
+      
+      return;
+    }
+  
+  /* Pathnames are equal. */
+  if (strcmp (source, destination) == 0)
+    {
+      g_mutex_unlock (ba->write_lock);
+      g_vfs_job_succeeded (G_VFS_JOB (job));
       
       return;
     }
@@ -1960,6 +1981,18 @@ do_delete (GVfsBackend   *backend,
                         G_IO_ERROR,
                         G_IO_ERROR_BUSY,
                         _("Can't do multiple write operations"));
+      return;
+    }
+  
+  /* Check validity of the file name. */
+  if (strcmp (pathname, "/") == 0)
+    {
+      g_vfs_job_failed (G_VFS_JOB (job),
+                        G_IO_ERROR,
+                        G_IO_ERROR_NOT_SUPPORTED,
+                        _("Operation not supported"));
+      g_mutex_unlock (ba->write_lock);
+      
       return;
     }
   
