@@ -994,7 +994,8 @@ archive_entry_set_info (struct archive_entry *entry,
   archive_entry_set_filetype (entry, type);
   archive_entry_set_pathname (entry, pathname);
   archive_entry_set_size (entry, g_file_info_get_size (info));
-  
+  archive_entry_set_perm (entry, 0644);
+
   /* FIXME: Add additional info.
      void archive_entry_set_dev(struct archive_entry *, dev_t);
      void archive_entry_set_devmajor(struct archive_entry *, dev_t);
@@ -1007,7 +1008,6 @@ archive_entry_set_info (struct archive_entry *entry,
      void archive_entry_set_link(struct archive_entry *, const char *);
      void archive_entry_set_mode(struct archive_entry *, __LA_MODE_T);
      void archive_entry_set_nlink(struct archive_entry *, unsigned int);
-     void archive_entry_set_perm(struct archive_entry *, __LA_MODE_T);
      void archive_entry_set_rdev(struct archive_entry *, dev_t);
      void archive_entry_set_rdevmajor(struct archive_entry *, dev_t);
      void archive_entry_set_rdevminor(struct archive_entry *, dev_t);
@@ -2077,6 +2077,7 @@ do_make_directory (GVfsBackend          *backend,
   entry = archive_entry_new ();
   archive_entry_set_filetype (entry, AE_IFDIR);
   archive_entry_set_pathname (entry, pathname + 1);
+  archive_entry_set_perm (entry, 0755);
   gvfs_archive_write_header (archive, entry);
   
   if (!gvfs_archive_in_error (archive))
