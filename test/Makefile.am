@@ -11,6 +11,7 @@ AM_LDFLAGS =                           \
 
 noinst_PROGRAMS = \
 	test-query-info-stream    \
+	test-backend-archive      \
 	benchmark-gvfs-small-files    \
 	benchmark-gvfs-big-files      \
 	benchmark-posix-small-files   \
