@@ -1503,6 +1503,7 @@ do_push (GVfsBackend          *backend,
   GFileInfo *info;
   GFileType type;
   GFileInputStream *stream;
+  gboolean is_dir;
   ssize_t read_bytes;
   ssize_t write_bytes;
   ssize_t size;
@@ -1521,33 +1522,36 @@ do_push (GVfsBackend          *backend,
     }
   
   /* Check for possible errors. */
-  if (g_file_test (source, G_FILE_TEST_IS_DIR))
-    {
-      g_vfs_job_failed (G_VFS_JOB (job), 
-                        G_IO_ERROR,
-                        G_IO_ERROR_WOULD_RECURSE,
-                        _("Can't recursively copy directory"));
-      g_mutex_unlock (ba->write_lock);
-      
-      return;
-    }
-  
+  is_dir = g_file_test (source, G_FILE_TEST_IS_DIR);
   archive_file = archive_file_find (ba, destination);
   if (archive_file != NULL)
     {
-       if (flags & G_FILE_COPY_OVERWRITE)
+      if (flags & G_FILE_COPY_OVERWRITE)
         {
-           type = g_file_info_get_file_type (archive_file->info);
-           if (type == G_FILE_TYPE_DIRECTORY)
-              {
-                g_vfs_job_failed (G_VFS_JOB (job), 
-                                  G_IO_ERROR,
-                                  G_IO_ERROR_WOULD_MERGE,
-                                 _("Can't copy file over directory"));
-                g_mutex_unlock (ba->write_lock);
-                
-                return;
-              }
+          if (is_dir)
+            {
+              type = g_file_info_get_file_type (archive_file->info);
+              if (type == G_FILE_TYPE_DIRECTORY)
+                {
+                  g_vfs_job_failed (G_VFS_JOB (job), 
+                                    G_IO_ERROR,
+                                    G_IO_ERROR_WOULD_MERGE,
+                                   _("Can't copy directory over directory"));
+                  g_mutex_unlock (ba->write_lock);
+                  
+                  return;
+                }
+              else
+                {
+                  g_vfs_job_failed (G_VFS_JOB (job), 
+                                    G_IO_ERROR,
+                                    G_IO_ERROR_WOULD_RECURSE,
+                                    _("Can't recursively copy directory"));
+                  g_mutex_unlock (ba->write_lock);
+                  
+                  return;
+                }
+            }
         }
       else
         {
@@ -1559,6 +1563,17 @@ do_push (GVfsBackend          *backend,
           
           return;
         }
+    }
+  
+  if (is_dir)
+    {
+      g_vfs_job_failed (G_VFS_JOB (job), 
+                        G_IO_ERROR,
+                        G_IO_ERROR_WOULD_RECURSE,
+                        _("Can't recursively copy directory"));
+      g_mutex_unlock (ba->write_lock);
+      
+      return;
     }
   
   if (!(flags & G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS))
