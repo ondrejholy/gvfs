@@ -22,6 +22,7 @@
  *         Ondrej Holy <xholyo00@stud.fit.vutbr.com>
  */
 
+/** @file gvfsbackendarchive.c */
 
 #include <config.h>
 
@@ -51,10 +52,13 @@
 #include "gvfsdaemonutils.h"
 #include "gvfskeyring.h"
 
+/** Icon of the backend. @showinitializer */
 #define MOUNT_ICON_NAME "drive-removable-media"
 
+/** Enable debug output. */
 #define PRINT_DEBUG  
 
+/** Print debug information. @showinitializer */
 #ifdef PRINT_DEBUG
 #define DEBUG g_print
 #else
@@ -64,28 +68,31 @@
 /*** TYPE DEFINITIONS ***/
 
 typedef struct _ArchiveFile ArchiveFile;
+
+/** Structure to represent file of virtual tree. */
 struct _ArchiveFile {
-  char *	name;			/* name of the file inside the archive */
-  GFileInfo *	info;			/* file info created from archive_entry */
-  GSList *	children;		/* (unordered) list of child files */
-  ArchiveFile * parent;                 /* The parent of the archive file. */
+  char *                name;           /**< The name of the file inside the archive. */
+  GFileInfo *           info;           /**< The file info created from the archive entry. */
+  GSList *              children;       /**< The list of the child files. */
+  ArchiveFile *         parent;         /**< The parent of the archive file. */
 };
 
+/** Structure to represent class members. */
 struct _GVfsBackendArchive
 {
-  GVfsBackend           backend;        /* The backend class. */
+  GVfsBackend           backend;        /**< The backend class. */
 
-  GFile *               file;           /* The archive file. */
-  ArchiveFile *         files;          /* The tree of files. */
+  GFile *               file;           /**< The archive file. */
+  ArchiveFile *         files;          /**< The tree of files. */
   
-  int                   format;         /* The format of the archive file. */
-  int                   filters_count;  /* The number of the filters. */
-  int *                 filters;        /* The filters of the archive. */
+  int                   format;         /**< The format of the archive file. */
+  int                   filters_count;  /**< The number of the filters. */
+  int *                 filters;        /**< The filters of the archive. */
   
-  gboolean              writable;       /* Can libarchive write this format? */
+  gboolean              writable;       /**< Tell if LibArchive can write this format. */
   
-  GMutex *              write_lock;     /* The mutex to lock during changes. */
-  GMutex *              read_lock;      /* The mutex to lock during reading. */
+  GMutex *              write_lock;     /**< The mutex to lock during changes. */
+  GMutex *              read_lock;      /**< The mutex to lock during reading. */
 };
 
 G_DEFINE_TYPE (GVfsBackendArchive, g_vfs_backend_archive, G_VFS_TYPE_BACKEND)
@@ -94,27 +101,42 @@ static void backend_unmount (GVfsBackendArchive *ba);
 
 /*** AN ARCHIVE WE CAN OPERATE ON ***/
 
-#define BLOCKSIZE 10240                 /* The size of the copy buffers. */
+/** The size of the copy buffers. @showinitializer */
+#define BLOCKSIZE 10240
 
+/** Structure to represent archive handler. */
 typedef struct 
 {
-  struct archive *      archive;        /* The archive handler for reading. */
-  GFile *               file;           /* The archive file. */
-  GFileInputStream *    stream;         /* The stream for reading the file. */
+  struct archive *      archive;        /**< The archive handler for reading. */
+  GFile *               file;           /**< The archive file. */
+  GFileInputStream *    stream;         /**< The stream for reading the file. */
   
-  struct archive *      temp_archive;   /* The archive handler for writing. */
-  GFile *               temp_file;      /* The temporary archive file. */
-  GFileOutputStream *   temp_stream;    /* The stream for writing the file. */
+  struct archive *      temp_archive;   /**< The archive handler for writing. */
+  GFile *               temp_file;      /**< The temporary archive file. */
+  GFileOutputStream *   temp_stream;    /**< The stream for writing the file. */
   
-  GVfsJob *             job;            /* The job which is processed. */
-  guchar                data[BLOCKSIZE];/* The buffer for IO operations. */
-  GError *              error;          /* The error of the archive. */
+  GVfsJob *             job;            /**< The job which is processed. */
+  guchar                data[BLOCKSIZE];/**< The buffer for IO operations. */
+  GError *              error;          /**< The error of the archive. */
 } GVfsArchive;
 
-/* Tell whether the archive is in error. */
+/**
+ * Tell if the archive is in error.
+ * @param archive Initialized archive structure ::GVfsArchive.
+ * @return TRUE if archive is in error.
+ * @see gvfs_archive_set_error_from_errno
+ */
 #define gvfs_archive_in_error(archive) ((archive)->error != NULL)
 
-/* Open the archive input stream (a libarchive callback). */
+/**
+ * Open the archive file input stream.
+ * @note It is a LibArchive callback.
+ * @param archive Archive read handler.
+ * @param data ::GVfsArchive data structure.
+ * @return ARCHIVE_OK on success, else ARCHIVE_FATAL.
+ * @see gvfs_archive_read_close, gvfs_archive_read, 
+ *      gvfs_archive_read_skip, gvfs_archive_read_seek
+ */
 static int
 gvfs_archive_read_open (struct archive *archive, 
                         void           *data)
@@ -131,7 +153,14 @@ gvfs_archive_read_open (struct archive *archive,
   return d->error ? ARCHIVE_FATAL : ARCHIVE_OK;
 }
 
-/* Open the archive output stream (a libarchive callback). */
+/**
+ * Open the archive file output stream.
+ * @note It is a LibArchive callback.
+ * @param archive Archive write handler.
+ * @param data ::GVfsArchive data structure.
+ * @return ARCHIVE_OK on success, else ARCHIVE_FATAL.
+ * @see gvfs_archive_write_close, gvfs_archive_write
+ */
 static int
 gvfs_archive_write_open (struct archive *archive, 
                          void           *data)
@@ -151,7 +180,16 @@ gvfs_archive_write_open (struct archive *archive,
   return d->error ? ARCHIVE_FATAL : ARCHIVE_OK;
 }
 
-/* Read data from the archive (a libarchive callback). */
+/**
+ * Read data from the archive file input stream.
+ * @note It is a LibArchive callback.
+ * @param archive Archive read handler.
+ * @param data ::GVfsArchive data structure.
+ * @param buffer Pointer to the available data (set by callback).
+ * @return Count of the read bytes, 0 on error.
+ * @see gvfs_archive_read_close, gvfs_archive_read_open, 
+ *      gvfs_archive_read_skip, gvfs_archive_read_seek
+ */
 static ssize_t
 gvfs_archive_read (struct archive *archive, 
 		   void           *data,
@@ -171,7 +209,16 @@ gvfs_archive_read (struct archive *archive,
   return read_bytes;
 }
 
-/* Write data into the archive (a libarchive callback). */
+/**
+ * Write data to the archive file output stream.
+ * @note It is a LibArchive callback.
+ * @param archive Archive write handler.
+ * @param data ::GVfsArchive data structure.
+ * @param buffer Data to write.
+ * @param length Count of bytes to write.
+ * @return Count of the wrote bytes, -1 on error.
+ * @see gvfs_archive_write_close, gvfs_archive_write_open
+ */
 static ssize_t 
 gvfs_archive_write (struct archive *archive, 
                     void           *data, 
@@ -195,7 +242,18 @@ gvfs_archive_write (struct archive *archive,
   return write_bytes;
 }
 
-/* Seek in the archive input stream (a libarchive callback). */
+/**
+ * Seek in the archive file input stream.
+ * @note It is a LibArchive callback. 
+ *       The interface to the seek callback is the same as the standard fseek().
+ * @param archive Archive read handler.
+ * @param data ::GVfsArchive data structure.
+ * @param request Offset for the new position .
+ * @param whence  Position in the stream.
+ * @return Actual position in the stream, ARCHIVE_FATAL on error.
+ * @see gvfs_archive_read_close, gvfs_archive_read_open, 
+ *      gvfs_archive_read_skip, gvfs_archive_read
+ */
 static off_t
 gvfs_archive_read_seek (struct archive *archive,
                         void           *data, 
@@ -245,7 +303,16 @@ gvfs_archive_read_seek (struct archive *archive,
   return g_seekable_tell (G_SEEKABLE (d->stream));
 }
 
-/* Skip in the archive input stream (a libarchive callback). */
+/**
+ * Skip in the archive file input stream.
+ * @note It is a LibArchive callback.
+ * @param archive Archive read handler.
+ * @param data ::GVfsArchive data structure.
+ * @param request Count of the bytes to skip.
+ * @return Count of the skipped bytes.
+ * @see gvfs_archive_read_close, gvfs_archive_read_open, 
+ *      gvfs_archive_read, gvfs_archive_read_seek
+ */
 static off_t
 gvfs_archive_read_skip (struct archive *archive,
                         void           *data,
@@ -257,7 +324,15 @@ gvfs_archive_read_skip (struct archive *archive,
   return request;
 }
 
-/* Close the archive input stream (a libarchive callback). */
+/**
+ * Close the archive file input stream.
+ * @note It is a LibArchive callback.
+ * @param archive Archive read handler.
+ * @param data ::GVfsArchive data structure.
+ * @return ARCHIVE_OK on success.
+ * @see gvfs_archive_read, gvfs_archive_read_open, 
+ *      gvfs_archive_read_skip, gvfs_archive_read_seek
+ */
 static int
 gvfs_archive_read_close (struct archive *archive,
                          void           *data)
@@ -272,7 +347,14 @@ gvfs_archive_read_close (struct archive *archive,
   return ARCHIVE_OK;
 }
 
-/* Close the archive output stream (a libarchive callback). */
+/**
+ * Close the archive file output stream.
+ * @note It is a LibArchive callback.
+ * @param archive Archive write handler.
+ * @param data ::GVfsArchive data structure.
+ * @return ARCHIVE_OK on success.
+ * @see gvfs_archive_write_close, gvfs_archive_write_close
+ */
 static int
 gvfs_archive_write_close (struct archive *archive,
                           void           *data)
@@ -287,7 +369,11 @@ gvfs_archive_write_close (struct archive *archive,
   return ARCHIVE_OK;
 }
 
-/* Set an error from the archive error. */
+/**
+ * Set the ::GVfsArchive error from the LibArchive error.
+ * @param archive ::GVfsArchive data structure.
+ * @see gvfs_archive_in_error
+ */
 static void
 gvfs_archive_set_error_from_errno (GVfsArchive *archive)
 {
@@ -311,7 +397,12 @@ gvfs_archive_set_error_from_errno (GVfsArchive *archive)
                      archive_error_string (error_archive));
 }
 
-/* Push the job into the archive structure. */
+/**
+ * Push the operation job to the ::GVfsArchive structure.
+ * @param archive ::GVfsArchive data structure.
+ * @param job Operation job.
+ * @see gvfs_archive_pop_job, gvfs_archive_new
+ */
 static void 
 gvfs_archive_push_job (GVfsArchive *archive,
                        GVfsJob *job)
@@ -322,7 +413,12 @@ gvfs_archive_push_job (GVfsArchive *archive,
   archive->job = job;
 }
 
-/* Pop the archive job and set the gvfs job result. */
+/**
+ * Pop the operation job from the ::GVfsArchive structure.
+ * @note Function set the result of the GVFS operation.
+ * @param archive ::GVfsArchive data structure.
+ * @see gvfs_archive_push_job, gvfs_archive_free
+ */
 static void 
 gvfs_archive_pop_job (GVfsArchive *archive)
 {
@@ -340,7 +436,13 @@ gvfs_archive_pop_job (GVfsArchive *archive)
   archive->job = NULL;
 }
 
-/* Close the archive and optionaly pop the job. */
+/**
+ * Free the ::GVfsArchive structure.
+ * @note It moves the temporary archive over original if no error.
+ * @param archive ::GVfsArchive data structure.
+ * @param pop TRUE to pop the result of the GVFS operation.
+ * @see gvfs_archive_new, gvfs_archive_pop, gvfs_archive_finish
+ */
 static void
 gvfs_archive_free (GVfsArchive *archive, 
                    gboolean     pop)
@@ -376,11 +478,22 @@ gvfs_archive_free (GVfsArchive *archive,
   g_slice_free (GVfsArchive, archive);
 }
 
-/* Close the archive and pop the job. */
+/**
+ * Free the ::GVfsArchive structure and pop the GVFS operation job.
+ * @note For more information look on ::gvfs_archive_free.
+ * @param archive ::GVfsArchive data structure.
+ * @see gvfs_archive_new, gvfs_archive_pop, gvfs_archive_free
+ */
 #define gvfs_archive_finish(archive) gvfs_archive_free ((archive), TRUE);
 
 #if ARCHIVE_VERSION_NUMBER < 3000200
-/* Set the filter based on the code. */
+/**
+ * Set the filter based on the code.
+ * @note It is new LibArchive function (only for backward compatibility).
+ * @param a LibArchive archive handler.
+ * @param code Filter code to set.
+ * @return ARCHIVE_OK on success, ARCHIVE_FATAL on error.
+ */
 static int
 archive_write_add_filter(struct archive *a, int code)
 {
@@ -409,19 +522,55 @@ archive_write_add_filter(struct archive *a, int code)
 }
 #endif
 
-/* Create a new readonly archive structure. */
+/**
+ * Create and initialize the new readonly ::GVfsArchive structure.
+ * @note For more information look on ::gvfs_archive_new.
+ * @param backend ::GVfsBackendArchive data structure.
+ * @param job GVFS operation job.
+ * @return Initialized ::GVfsArchive data structure, NULL on error
+ * @see gvfs_archive_new, gvfs_archive_write_new, 
+ *      gvfs_archive_readwrite_new, gvfs_archive_push_job
+ */
 #define gvfs_archive_read_new(backend, job) \
   gvfs_archive_new ((backend), (job), TRUE, FALSE)
 
-/* Create a new writeonly archive structure. */
+/**
+ * Create and initialize the new writeonly ::GVfsArchive structure.
+ * @note For more information look on ::gvfs_archive_new.
+ * @param backend ::GVfsBackendArchive data structure.
+ * @param job GVFS operation job.
+ * @return Initialized ::GVfsArchive data structure, NULL on error
+ * @see gvfs_archive_read_new, gvfs_archive_new, 
+ *      gvfs_archive_readwrite_new, gvfs_archive_push_job
+ */
 #define gvfs_archive_write_new(backend, job) \
   gvfs_archive_new ((backend), (job), FALSE, TRUE)
 
-/* Create a new readwrite archive structure. */
+/**
+ * Create and initialize the new readwrite ::GVfsArchive structure.
+ * @note For more information look on ::gvfs_archive_new.
+ * @param backend ::GVfsBackendArchive data structure.
+ * @param job GVFS operation job.
+ * @return Initialized ::GVfsArchive data structure, NULL on error
+ * @see gvfs_archive_read_new, gvfs_archive_write_new, 
+ *      gvfs_archive_new, gvfs_archive_push_job
+ */
 #define gvfs_archive_readwrite_new(backend, job) \
   gvfs_archive_new ((backend), (job), TRUE, TRUE)
 
-/* Create a new archive structure. */
+/**
+ * Create and initialize the new ::GVfsArchive structure.
+ * @note It pushes the GVFS operation job. 
+ *       It must be closed by ::gvfs_archive_free.
+ * @param ba ::GVfsBackendArchive data structure.
+ * @param job GVFS operation job.
+ * @param readable Tell if the archive should be readable.
+ * @param writeable Tell if the archive should be writable.
+ * @return Initialized ::GVfsArchive data structure, NULL on error
+ * @see gvfs_archive_read_new, gvfs_archive_write_new, 
+ *      gvfs_archive_readwrite_new, gvfs_archive_push_job, 
+ *      gvfs_archive_free
+ */
 static GVfsArchive *
 gvfs_archive_new (GVfsBackendArchive *ba, 
                   GVfsJob            *job,
@@ -520,7 +669,15 @@ gvfs_archive_new (GVfsBackendArchive *ba,
   return d;
 }
 
-/* Read next header from the archive. */
+/**
+ * Read next header from the archive.
+ * @note Archive must be opened by ::gvfs_archive_new for reading.
+ *       Filepath is without a leading slash.
+ * @param archive ::GVfsArchive data structure.
+ * @param entry Pointer to the archive entry (set by function).
+ * @return ARCHIVE_OK on success, else LibArchive error code.
+ * @see gvfs_archive_new, gvfs_archive_read_data
+ */
 static int 
 gvfs_archive_read_header (GVfsArchive           *archive,
                           struct archive_entry **entry)
@@ -548,7 +705,14 @@ gvfs_archive_read_header (GVfsArchive           *archive,
   return result;
 }
 
-/* Write header into the archive. */
+/**
+ * Write header to the archive.
+ * @note Archive must be opened by ::gvfs_archive_new for writing.
+ * @param archive ::GVfsArchive data structure.
+ * @param entry Archive entry to write.
+ * @return ARCHIVE_OK on success, else LibArchive error code.
+ * @see gvfs_archive_new, gvfs_archive_write_data
+ */
 static int
 gvfs_archive_write_header (GVfsArchive          *archive,
                            struct archive_entry *entry)
@@ -565,7 +729,16 @@ gvfs_archive_write_header (GVfsArchive          *archive,
   return result;
 }
 
-/* Read data from the archive. */
+/**
+ * Read data blocks from the archive.
+ * @note It must be used after ::gvfs_archive_read_header.
+ *       Archive must be opened by ::gvfs_archive_new for reading.
+ * @param archive ::GVfsArchive data structure.
+ * @param data Buffer for reading.
+ * @param size Size of the buffer.
+ * @return Count of read bytes, ARCHIVE_FATAL on failure.
+ * @see gvfs_archive_new, gvfs_archive_read_header, gvfs_archive_copy_data
+ */
 static ssize_t
 gvfs_archive_read_data (GVfsArchive *archive,
                         guchar      *data,
@@ -583,7 +756,16 @@ gvfs_archive_read_data (GVfsArchive *archive,
   return read_bytes;
 }
 
-/* Write data to the archive. */
+/**
+ * Write data blocks to the archive.
+ * @note It must be used after ::gvfs_archive_write_header.
+ *       Archive must be opened by ::gvfs_archive_new for writing.
+ * @param archive ::GVfsArchive data structure.
+ * @param data Buffer for writing.
+ * @param size Size of the buffer.
+ * @return Count of wrote bytes, ARCHIVE_FATAL on failure.
+ * @see gvfs_archive_new, gvfs_archive_write_header, gvfs_archive_copy_data
+ */
 static ssize_t 
 gvfs_archive_write_data (GVfsArchive *archive,
                          guchar      *data,
@@ -601,7 +783,12 @@ gvfs_archive_write_data (GVfsArchive *archive,
   return write_bytes;
 }
 
-/* Copy archive data between the read and write handle. */
+/**
+ * Copy data blocks from the read archive to the write archive.
+ * @note Archive must be opened by ::gvfs_archive_new for reading and writing.
+ * @param archive ::GVfsArchive data structure.
+ * @see gvfs_archive_new, gvfs_archive_read_data, gvfs_archive_write_data
+ */
 static void 
 gvfs_archive_copy_data (GVfsArchive *archive)
 {
@@ -634,8 +821,18 @@ gvfs_archive_copy_data (GVfsArchive *archive)
   while (read_bytes > 0);
 }
 
-/* Copy the archive until find an entry with a pathname prefix. 
-   NB: The prefix must not start with a slash. */
+/**
+ * Copy the archive until find an entry with a pathname prefix. 
+ * @note Archive must be opened by ::gvfs_archive_new for reading and writing.
+ *       Prefixes is absolute path, but must not start with a slash.
+ * @param archive ::GVfsArchive data structure.
+ * @param prefix1 Pathname prefix or NULL.
+ * @param prefix2 Pathname prefix or NULL.
+ * @return Archive entry if prefix was found, NULL on the end.
+ * @see gvfs_archive_new, gvfs_archive_copy,
+ *      gvfs_archive_read_data, gvfs_archive_write_data,
+ *      gvfs_archive_read_header, gvfs_archive_write_header
+ */
 static struct archive_entry *
 gvfs_archive_copy_prefix (GVfsArchive *archive,
                           const char  *prefix1,
@@ -677,7 +874,14 @@ gvfs_archive_copy_prefix (GVfsArchive *archive,
   return NULL;
 }
 
-/* Copy the whole archive. */
+/**
+ * Copy the whole archive. 
+ * @note For more information look on ::gvfs_archive_copy_prefix.
+ * @param archive ::GVfsArchive data structure.
+ * @see gvfs_archive_new, gvfs_archive_copy_prefix,
+ *      gvfs_archive_read_data, gvfs_archive_write_data, 
+ *      gvfs_archive_read_header, gvfs_archive_write_header 
+ */
 #define gvfs_archive_copy(archive) \
   gvfs_archive_copy_prefix ((archive), NULL, NULL)
 
@@ -702,7 +906,17 @@ g_vfs_backend_archive_init (GVfsBackendArchive *archive)
 
 /*** FILE TREE HANDLING ***/
 
-/* NB: filename must NOT start with a slash */
+/**
+ * Find and optionally add a new file in the virtual file tree. 
+ * @note Filename must not start with a slash. 
+ *       The root of the file tree must be initialized by ::create_root_file.
+ * @param file Initialized root ::ArchiveFile of the file tree.
+ * @param filename Filename to search.
+ * @param add Tell if a nonexistent filename will be added.
+ * @return ::ArchiveFile if was found or added, NULL if was not found.
+ * @see archive_file_find, create_root_file, archive_file_free,
+ *      archive_file_set_info_from_entry, create_file_tree
+ */
 static ArchiveFile *
 archive_file_get_from_path (ArchiveFile *file, const char *filename, gboolean add)
 {
@@ -755,8 +969,24 @@ archive_file_get_from_path (ArchiveFile *file, const char *filename, gboolean ad
   g_strfreev (names);
   return file;
 }
+
+/**
+ * Find a file in the virtual file tree. 
+ * @note Filename must start with a slash.
+ *       For more information look on ::archive_file_get_from_path.     
+ * @param ba Structure ::GVfsBackendArchive.
+ * @param filename Filename to search.
+ * @return ::ArchiveFile if was found, NULL if was not found.
+ * @see archive_file_get_from_path, create_root_file
+ */
 #define archive_file_find(ba, filename) archive_file_get_from_path((ba)->files, (filename) + 1, FALSE)
 
+/**
+ * Create a root file of the virtual file tree. 
+ * @param ba Structure ::GVfsBackendArchive.
+ * @see archive_file_get_from_path, archive_file_find, 
+ *      create_file_tree, archive_file_free
+ */
 static void
 create_root_file (GVfsBackendArchive *ba)
 {
@@ -808,7 +1038,14 @@ create_root_file (GVfsBackendArchive *ba)
   g_object_unref (icon);
 }
 
-/* Set archive file info from archive entry info. */
+/**
+ * Set ::ArchiveFile info from the archive entry info. 
+ * @param ba Structure ::GVfsBackendArchive.
+ * @param file Initialized ::ArchiveFile for setting the info.
+ * @param entry Archive entry containing info.
+ * @param entry_index Order number in the archive.
+ * @see archive_file_get_from_path, archive_entry_set_info, create_file_tree
+ */
 static void
 archive_file_set_info_from_entry (GVfsBackendArchive   *ba,
                                   ArchiveFile *         file, 
@@ -918,8 +1155,14 @@ const char		*archive_entry_uname(struct archive_entry *);
   /* FIXME: do ACLs */
 }
 
-/* Set archive entry info from file info.
-   NB: The pathname must not start with a slash. */
+/**
+ * Set archive entry info from file info. 
+ * @note Pathname must not start with a slash.
+ * @param entry Initialized archive entry for setting.
+ * @param pathname Name of the new file.
+ * @param info File info.
+ * @see archive_file_set_info_from_entry
+ */
 static void
 archive_entry_set_info (struct archive_entry *entry,
                         const char           *pathname,
@@ -1016,6 +1259,11 @@ archive_entry_set_info (struct archive_entry *entry,
   */
 }
 
+/**
+ * Set default dir info if was not set from archive entry. 
+ * @param file Initialized root ::ArchiveFile of the file tree.
+ * @see create_file_tree, create_root_file, archive_file_get_from_path
+ */
 static void
 fixup_dirs (ArchiveFile *file)
 {
@@ -1036,6 +1284,14 @@ fixup_dirs (ArchiveFile *file)
     fixup_dirs (l->data);
 }
 
+/**
+ * Create virtual file tree from the archive.
+ * @note The GVFS job is popped by ::gvfs_archive_pop_job.
+ * @param ba Initialized ::GVfsBackendArchive structure.
+ * @param job GVFS job.
+ * @see fixup_dirs, create_root_file, archive_file_free,
+ *      archive_file_get_from_path, archive_file_set_info_from_entry
+ */
 static void
 create_file_tree (GVfsBackendArchive *ba, GVfsJob *job)
 {
@@ -1078,6 +1334,12 @@ create_file_tree (GVfsBackendArchive *ba, GVfsJob *job)
   gvfs_archive_finish (archive);
 }
 
+/**
+ * Free the virtual file tree.
+ * @note The GVFS job is popped by ::gvfs_archive_pop_job.
+ * @param file Initialized root ::ArchiveFile of the file tree.
+ * @see create_root_file, create_file_tree, archive_file_get_from_path
+ */
 static void
 archive_file_free (ArchiveFile *file)
 {
@@ -1150,7 +1412,13 @@ determine_archive_format (GVfsBackendArchive *ba,
   return NULL;
 }
 
-/* Create an empty archive file. */
+/**
+ * Create an empty archive file.
+ * @note The GVFS job is popped by ::gvfs_archive_pop_job.
+ * @param ba Initialized ::GVfsBackendArchive structure.
+ * @param job GVFS job.
+ * @see do_mount
+ */
 static void
 create_empty_archive (GVfsBackendArchive *ba, 
                       GVfsJob            *job)
@@ -1184,7 +1452,17 @@ create_empty_archive (GVfsBackendArchive *ba,
   gvfs_archive_finish (archive);
 }
 
-/* Mount an archive file. */
+/**
+ * Mount the archive backend.
+ * @note The GVFS operation.
+ * @param backend ::GVfsBackendArchive structure.
+ * @param job GVFS job.
+ * @param mount_spec Backend mount options.
+ * @param mount_source Backend connection handler.
+ * @param is_automount Tell if is mounted automaticaly.
+ * @see create_empty_archive, determine_archive_format, 
+ *      create_file_tree, do_unmount
+ */
 static void
 do_mount (GVfsBackend *backend,
 	  GVfsJobMount *job,
@@ -1333,6 +1611,11 @@ do_mount (GVfsBackend *backend,
     create_empty_archive (archive, G_VFS_JOB (job));
 }
 
+/**
+ * Free ::GVfsBackendArchive members.
+ * @param ba ::GVfsBackendArchive structure.
+ * @see do_unmount
+ */
 static void
 backend_unmount (GVfsBackendArchive *ba)
 {
@@ -1363,6 +1646,15 @@ backend_unmount (GVfsBackendArchive *ba)
     }
 }
 
+/**
+ * Unmount the archive backend.
+ * @note The GVFS operation.
+ * @param backend ::GVfsBackendArchive structure.
+ * @param job GVFS job.
+ * @param flags Backend unmount options.
+ * @param mount_source Backend connection handler.
+ * @see do_mount, backend_unmount
+ */
 static void
 do_unmount (GVfsBackend *backend,
 	    GVfsJobUnmount *job,
@@ -1374,6 +1666,14 @@ do_unmount (GVfsBackend *backend,
   g_vfs_job_succeeded (G_VFS_JOB (job));
 }
 
+/**
+ * Open archive for reading.
+ * @note The GVFS operation.
+ * @param backend ::GVfsBackendArchive structure.
+ * @param job GVFS job.
+ * @param filename File pathname to read.
+ * @see do_read, do_close_read
+ */
 static void
 do_open_for_read (GVfsBackend *       backend,
 		  GVfsJobOpenForRead *job,
@@ -1454,6 +1754,14 @@ do_open_for_read (GVfsBackend *       backend,
   gvfs_archive_finish (archive);
 }
 
+/**
+ * Close archive after reading.
+ * @note The GVFS operation.
+ * @param backend ::GVfsBackendArchive structure.
+ * @param job GVFS job.
+ * @param handle Opened ::GVfsArchive structure.
+ * @see do_read, do_open_for_read
+ */
 static void
 do_close_read (GVfsBackend *backend,
 	       GVfsJobCloseRead *job,
@@ -1465,6 +1773,16 @@ do_close_read (GVfsBackend *backend,
   gvfs_archive_finish (archive);
 }
 
+/**
+ * Read a data from the archive.
+ * @note The GVFS operation.
+ * @param backend ::GVfsBackendArchive structure.
+ * @param job GVFS job.
+ * @param handle Opened ::GVfsArchive structure.
+ * @param buffer Buffer for read data.
+ * @param bytes_requested Count of bytes to read.
+ * @see do_close_read, do_open_for_read
+ */
 static void
 do_read (GVfsBackend *backend,
 	 GVfsJobRead *job,
@@ -1484,7 +1802,19 @@ do_read (GVfsBackend *backend,
   gvfs_archive_pop_job (archive);
 }
 
-/* Push a file into the archive. */
+/**
+ * Push the file from the local filesystem in to the archive.
+ * @note The GVFS operation.
+ *       For details about flags and structures see GFile documentation page. 
+ * @param backend ::GVfsBackendArchive structure.
+ * @param job GVFS job.
+ * @param destination Destination pathname for file in the archive.
+ * @param source Source pathname for the local filesystem file.
+ * @param flags Copy flags.
+ * @param remove_source TRUE for move, FALSE for copy.
+ * @param progress_callback Progress callback.
+ * @param progress_callback_data Data for progress callback.
+ */
 static void
 do_push (GVfsBackend          *backend,
          GVfsJobPush          *job,
@@ -1685,7 +2015,16 @@ do_push (GVfsBackend          *backend,
   gvfs_archive_finish (archive);
 }
 
-/* Rename a file in the archive. */
+/**
+ * Rename file inside the archive.
+ * @note The GVFS operation.
+ *       For move use ::do_move.
+ * @param backend ::GVfsBackendArchive structure.
+ * @param job GVFS job.
+ * @param pathname Source file pathname.
+ * @param display_name New name for file without path.
+ * @see do_move
+ */
 static void
 do_set_display_name (GVfsBackend           *backend,
                      GVfsJobSetDisplayName *job,
@@ -1819,7 +2158,19 @@ do_set_display_name (GVfsBackend           *backend,
   gvfs_archive_finish (archive);  
 }
 
-/* Move a file in the archive. */
+/**
+ * Move file inside the archive.
+ * @note The GVFS operation.
+ *       For rename use ::do_set_display_name.
+ * @param backend ::GVfsBackendArchive structure.
+ * @param job GVFS job.
+ * @param source Source file pathname.
+ * @param destination Destination file pathname.
+ * @param flags Copy flags.
+ * @param progress_callback Progress callback.
+ * @param progress_callback_data Data for progress callback.
+ * @see do_set_display_name
+ */
 static void
 do_move (GVfsBackend *backend,
          GVfsJobMove *job,
@@ -1976,7 +2327,13 @@ do_move (GVfsBackend *backend,
   gvfs_archive_finish (archive);
 }
 
-/* Delete a file in the archive. */
+/**
+ * Delete file inside the archive.
+ * @note The GVFS operation.
+ * @param backend ::GVfsBackendArchive structure.
+ * @param job GVFS job.
+ * @param pathname File pathname to delete.
+ */
 static void
 do_delete (GVfsBackend   *backend,
            GVfsJobDelete *job,
@@ -2049,7 +2406,13 @@ do_delete (GVfsBackend   *backend,
   gvfs_archive_finish (archive);  
 }
 
-/* Make a directory in the archive. */
+/**
+ * Make a new directory inside the archive.
+ * @note The GVFS operation.
+ * @param backend ::GVfsBackendArchive structure.
+ * @param job GVFS job.
+ * @param pathname Directory pathname to create.
+ */
 static void
 do_make_directory (GVfsBackend          *backend,
                    GVfsJobMakeDirectory *job,
@@ -2113,6 +2476,18 @@ do_make_directory (GVfsBackend          *backend,
   gvfs_archive_finish (archive);  
 }
 
+/**
+ * Get info about the file inside the archive.
+ * @note The GVFS operation.
+ *       For details about flags and structures see GFile documentation page. 
+ * @param backend ::GVfsBackendArchive structure.
+ * @param job GVFS job.
+ * @param filename File pathname to get info.
+ * @param flags Query flags.
+ * @param info Info structure (set by function).
+ * @param attribute_matcher Filter for matching attributes.
+ * @see try_query_fs_info
+ */
 static void
 do_query_info (GVfsBackend *backend,
 	       GVfsJobQueryInfo *job,
@@ -2148,6 +2523,16 @@ do_query_info (GVfsBackend *backend,
   g_vfs_job_succeeded (G_VFS_JOB (job));
 }
 
+/**
+ * Enumerate children of dir inside the archive.
+ * @note The GVFS operation.
+ *       For details about flags and structures see GFile documentation page. 
+ * @param backend ::GVfsBackendArchive structure.
+ * @param job GVFS job.
+ * @param filename Dir pathname to get children.
+ * @param attribute_matcher Filter for matching attributes.
+ * @param flags Query flags.
+ */
 static void
 do_enumerate (GVfsBackend *backend,
 	      GVfsJobEnumerate *job,
@@ -2200,6 +2585,17 @@ do_enumerate (GVfsBackend *backend,
   g_vfs_job_succeeded (G_VFS_JOB (job));
 }
 
+/**
+ * Get info about the archive filesystem.
+ * @note The GVFS operation.
+ *       For details about flags and structures see GFile documentation page. 
+ * @param backend ::GVfsBackendArchive structure.
+ * @param job GVFS job.
+ * @param filename File pathname to get info.
+ * @param info Info structure (set by function).
+ * @param attribute_matcher Filter for matching attributes.
+ * @see do_query_info
+ */
 static gboolean
 try_query_fs_info (GVfsBackend *backend,
                    GVfsJobQueryFsInfo *job,
