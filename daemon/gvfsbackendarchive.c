@@ -55,10 +55,12 @@
 /** Icon of the backend. @showinitializer */
 #define MOUNT_ICON_NAME "drive-removable-media"
 
-/** Enable debug output. */
-#define PRINT_DEBUG  
+/* #define PRINT_DEBUG */
 
-/** Print debug information. @showinitializer */
+/** 
+ * Print debug information @showinitializer 
+ * @note Enable using macro ::PRINT_DEBUG. 
+ */
 #ifdef PRINT_DEBUG
 #define DEBUG g_print
 #else
