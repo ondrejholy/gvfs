@@ -488,7 +488,7 @@ gvfs_archive_free (GVfsArchive *archive,
  */
 #define gvfs_archive_finish(archive) gvfs_archive_free ((archive), TRUE);
 
-#if ARCHIVE_VERSION_NUMBER < 3000200
+#if ARCHIVE_VERSION_NUMBER < 3000004
 /**
  * Set the filter based on the code.
  * @note It is new LibArchive function (only for backward compatibility).
