@@ -1394,14 +1394,15 @@ determine_archive_format (GVfsBackendArchive *ba,
 
   /* FIXME: Determine an archive options too. */
   
-  gvfs_archive_free (archive, FALSE);
-  
   /* Check if format is writable. */
-  archive->archive = archive_write_new ();
-  result = archive_write_set_format (archive->archive, ba->format);
+  archive->temp_archive = archive_write_new ();
+  result = archive_write_set_format (archive->temp_archive, ba->format);
   for (i = 0; i < ba->filters_count && result == ARCHIVE_OK; i++)
-    result = archive_write_add_filter (archive->archive, ba->filters [i]);
-  archive_write_free (archive->archive);
+    result = archive_write_add_filter (archive->temp_archive, ba->filters [i]);
+  archive_write_free (archive->temp_archive);
+  archive->temp_archive = NULL;
+  
+  gvfs_archive_free (archive, FALSE);
   
   if (result != ARCHIVE_OK)
     ba->writable = FALSE;
