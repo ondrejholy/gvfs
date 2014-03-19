@@ -200,6 +200,7 @@ libgvfsdaemon_la_SOURCES = \
 	gvfsjobqueryattributes.c gvfsjobqueryattributes.h \
 	gvfsjobcreatemonitor.c gvfsjobcreatemonitor.h \
 	gvfskeyring.h gvfskeyring.c \
+	gvfsinfocache.c gvfsinfocache.h \
         $(NULL)
 
 # needed by cygwin (see bug #564003)
