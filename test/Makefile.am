@@ -14,7 +14,17 @@ noinst_PROGRAMS = \
 	benchmark-gvfs-big-files      \
 	benchmark-posix-small-files   \
 	benchmark-posix-big-files     \
+	test-info-cache-structure     \
 	$(NULL)
+
+test_info_cache_structure_SOURCES = \
+	../daemon/gvfsinfocache.h \
+	../daemon/gvfsinfocache.c \
+	test-info-cache-structure.c
+
+test_info_cache_structure_CFLAGS = \
+	$(GLIB_CFLAGS) \
+	-I../daemon
 
 session.conf: session.conf.in ../config.log
 	$(AM_V_GEN) $(SED) -e "s|\@testdir\@|$(abs_builddir)|" $< > $@
