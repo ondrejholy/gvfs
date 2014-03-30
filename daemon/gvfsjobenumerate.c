@@ -32,6 +32,7 @@
 #include "gvfsjobenumerate.h"
 #include "gvfsdaemonprotocol.h"
 #include <gvfsdbus.h>
+#include "gvfsinfocache.h"
 
 G_DEFINE_TYPE (GVfsJobEnumerate, g_vfs_job_enumerate, G_VFS_TYPE_JOB_DBUS)
 
@@ -54,7 +55,7 @@ g_vfs_job_enumerate_finalize (GObject *object)
   g_file_attribute_matcher_unref (job->attribute_matcher);
   g_free (job->object_path);
   g_free (job->uri);
-  
+
   if (G_OBJECT_CLASS (g_vfs_job_enumerate_parent_class)->finalize)
     (*G_OBJECT_CLASS (g_vfs_job_enumerate_parent_class)->finalize) (object);
 }
@@ -65,7 +66,7 @@ g_vfs_job_enumerate_class_init (GVfsJobEnumerateClass *klass)
   GObjectClass *gobject_class = G_OBJECT_CLASS (klass);
   GVfsJobClass *job_class = G_VFS_JOB_CLASS (klass);
   GVfsJobDBusClass *job_dbus_class = G_VFS_JOB_DBUS_CLASS (klass);
-  
+
   gobject_class->finalize = g_vfs_job_enumerate_finalize;
   job_class->run = run;
   job_class->try = try;
@@ -97,7 +98,6 @@ g_vfs_job_enumerate_new_handle (GVfsDBusMount *object,
                       "object", object,
                       "invocation", invocation,
                       NULL);
-  
   job->object_path = g_strdup (arg_obj_path);
   job->filename = g_strdup (arg_path_data);
   job->backend = backend;
@@ -172,9 +172,10 @@ void
 g_vfs_job_enumerate_add_info (GVfsJobEnumerate *job,
 			      GFileInfo *info)
 {
-  char *uri, *escaped_name;
+  char *uri, *escaped_name, *filename;
   GVariant *v;
-  
+  GVfsInfoCache *info_cache = g_vfs_backend_get_info_cache (job->backend);
+
   if (job->building_infos == NULL)
     {
       job->building_infos = g_variant_builder_new (G_VARIANT_TYPE ("aa(suv)"));
@@ -190,6 +191,20 @@ g_vfs_job_enumerate_add_info (GVfsJobEnumerate *job,
 					  FALSE);
       uri = g_build_path ("/", job->uri, escaped_name, NULL);
       g_free (escaped_name);
+    }
+
+  /* Store info into the info cache */
+  if (info_cache)
+    {
+      filename = g_build_path ("/",
+                               job->filename,
+                               g_file_info_get_name (info),
+                               NULL);
+      g_vfs_info_cache_insert (info_cache,
+                               filename,
+                               g_file_info_dup (info),
+                               g_file_attribute_matcher_ref (job->attribute_matcher),
+                               job->flags);
     }
   
   g_vfs_backend_add_auto_info (job->backend,
@@ -284,7 +299,7 @@ try (GVfsJob *job)
 {
   GVfsJobEnumerate *op_job = G_VFS_JOB_ENUMERATE (job);
   GVfsBackendClass *class = G_VFS_BACKEND_GET_CLASS (op_job->backend);
-  
+
   if (class->try_enumerate == NULL)
     return FALSE;
   

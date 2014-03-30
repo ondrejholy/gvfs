@@ -31,6 +31,7 @@
 #include <glib/gi18n.h>
 #include "gvfsjobdelete.h"
 #include "gvfsdaemonprotocol.h"
+#include "gvfsinfocache.h"
 
 G_DEFINE_TYPE (GVfsJobDelete, g_vfs_job_delete, G_VFS_TYPE_JOB_DBUS)
 
@@ -39,6 +40,7 @@ static gboolean     try          (GVfsJob        *job);
 static void         create_reply (GVfsJob               *job,
                                   GVfsDBusMount         *object,
                                   GDBusMethodInvocation *invocation);
+static void         finished     (GVfsJob *job);
 
 static void
 g_vfs_job_delete_finalize (GObject *object)
@@ -63,6 +65,7 @@ g_vfs_job_delete_class_init (GVfsJobDeleteClass *klass)
   gobject_class->finalize = g_vfs_job_delete_finalize;
   job_class->run = run;
   job_class->try = try;
+  job_class->finished = finished;
   job_dbus_class->create_reply = create_reply;
 }
 
@@ -119,6 +122,14 @@ try (GVfsJob *job)
 {
   GVfsJobDelete *op_job = G_VFS_JOB_DELETE (job);
   GVfsBackendClass *class = G_VFS_BACKEND_GET_CLASS (op_job->backend);
+  GVfsInfoCache *info_cache = g_vfs_backend_get_info_cache (op_job->backend);
+
+  /* Disable info cache before writing */
+  if (info_cache)
+    {
+      g_vfs_info_cache_disable (info_cache);
+      g_vfs_info_cache_invalidate (info_cache, op_job->filename, FALSE);
+    }
 
   if (class->try_delete == NULL)
     return FALSE;
@@ -135,4 +146,15 @@ create_reply (GVfsJob *job,
               GDBusMethodInvocation *invocation)
 {
   gvfs_dbus_mount_complete_delete (object, invocation);
+}
+
+static void
+finished (GVfsJob *job)
+{
+  GVfsJobDelete *op_job = G_VFS_JOB_DELETE (job);
+  GVfsInfoCache *info_cache = g_vfs_backend_get_info_cache (op_job->backend);
+
+  /* Enable info cache after writing */
+  if (info_cache)
+    g_vfs_info_cache_enable (info_cache);
 }

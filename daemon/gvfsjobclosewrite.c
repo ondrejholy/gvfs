@@ -32,12 +32,14 @@
 #include "gvfswritechannel.h"
 #include "gvfsjobclosewrite.h"
 #include "gvfsdaemonutils.h"
+#include "gvfsinfocache.h"
 
 G_DEFINE_TYPE (GVfsJobCloseWrite, g_vfs_job_close_write, G_VFS_TYPE_JOB)
 
 static void run (GVfsJob *job);
 static gboolean try (GVfsJob *job);
 static void send_reply (GVfsJob *job);
+static void finished (GVfsJob *job);
 
 static void
 g_vfs_job_close_write_finalize (GObject *object)
@@ -63,6 +65,7 @@ g_vfs_job_close_write_class_init (GVfsJobCloseWriteClass *klass)
   job_class->run = run;
   job_class->try = try;
   job_class->send_reply = send_reply;
+  job_class->finished = finished;
 }
 
 static void
@@ -99,7 +102,7 @@ static void
 send_reply (GVfsJob *job)
 {
   GVfsJobCloseWrite *op_job = G_VFS_JOB_CLOSE_WRITE (job);
-  
+
   g_debug ("job_close_write send reply\n");
 
   if (job->failed)
@@ -138,4 +141,15 @@ try (GVfsJob *job)
   return class->try_close_write (op_job->backend,
 				 op_job,
 				 op_job->handle);
+}
+
+static void
+finished (GVfsJob *job)
+{
+  GVfsJobCloseWrite *op_job = G_VFS_JOB_CLOSE_WRITE (job);
+  GVfsInfoCache *info_cache = g_vfs_backend_get_info_cache (op_job->backend);
+
+  /* Enable info cache after writing */
+  if (info_cache)
+    g_vfs_info_cache_enable (info_cache);
 }

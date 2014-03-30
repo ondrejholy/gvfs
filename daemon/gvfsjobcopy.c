@@ -32,6 +32,7 @@
 #include <glib/gi18n.h>
 #include "gvfsjobcopy.h"
 #include <gvfsdbus.h>
+#include "gvfsinfocache.h"
 
 G_DEFINE_TYPE (GVfsJobCopy, g_vfs_job_copy, G_VFS_TYPE_JOB_PROGRESS)
 
@@ -40,6 +41,7 @@ static gboolean     try          (GVfsJob        *job);
 static void         create_reply (GVfsJob               *job,
                                   GVfsDBusMount         *object,
                                   GDBusMethodInvocation *invocation);
+static void         finished     (GVfsJob *job);
 
 static void
 g_vfs_job_copy_finalize (GObject *object)
@@ -65,6 +67,7 @@ g_vfs_job_copy_class_init (GVfsJobCopyClass *klass)
   gobject_class->finalize = g_vfs_job_copy_finalize;
   job_class->run = run;
   job_class->try = try;
+  job_class->finished = finished;
   job_dbus_class->create_reply = create_reply;
 }
 
@@ -140,6 +143,14 @@ try (GVfsJob *job)
   GVfsJobProgress *progress_job = G_VFS_JOB_PROGRESS (job);
   GVfsBackendClass *class = G_VFS_BACKEND_GET_CLASS (op_job->backend);
   gboolean res;
+  GVfsInfoCache *info_cache = g_vfs_backend_get_info_cache (op_job->backend);
+
+  /* Disable info cache before writing */
+  if (info_cache)
+    {
+      g_vfs_info_cache_disable (info_cache);
+      g_vfs_info_cache_invalidate (info_cache, op_job->destination, FALSE);
+    }
 
   if (class->try_copy == NULL)
     return FALSE;
@@ -164,4 +175,15 @@ create_reply (GVfsJob *job,
               GDBusMethodInvocation *invocation)
 {
   gvfs_dbus_mount_complete_copy (object, invocation);
+}
+
+static void
+finished (GVfsJob *job)
+{
+  GVfsJobCopy *op_job = G_VFS_JOB_COPY (job);
+  GVfsInfoCache *info_cache = g_vfs_backend_get_info_cache (op_job->backend);
+
+  /* Enable info cache after writing */
+  if (info_cache)
+    g_vfs_info_cache_enable (info_cache);
 }

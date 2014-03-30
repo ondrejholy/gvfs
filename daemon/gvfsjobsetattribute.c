@@ -31,6 +31,7 @@
 #include <glib/gi18n.h>
 #include "gvfsjobmove.h"
 #include "gvfsjobsetattribute.h"
+#include "gvfsinfocache.h"
 
 G_DEFINE_TYPE (GVfsJobSetAttribute, g_vfs_job_set_attribute, G_VFS_TYPE_JOB_DBUS)
 
@@ -39,6 +40,7 @@ static gboolean     try          (GVfsJob        *job);
 static void         create_reply (GVfsJob               *job,
                                   GVfsDBusMount         *object,
                                   GDBusMethodInvocation *invocation);
+static void         finished     (GVfsJob        *job);
 
 static void
 g_vfs_job_set_attribute_finalize (GObject *object)
@@ -66,6 +68,7 @@ g_vfs_job_set_attribute_class_init (GVfsJobSetAttributeClass *klass)
   gobject_class->finalize = g_vfs_job_set_attribute_finalize;
   job_class->run = run;
   job_class->try = try;
+  job_class->finished = finished;
   job_dbus_class->create_reply = create_reply;
 }
 
@@ -145,6 +148,14 @@ try (GVfsJob *job)
 {
   GVfsJobSetAttribute *op_job = G_VFS_JOB_SET_ATTRIBUTE (job);
   GVfsBackendClass *class = G_VFS_BACKEND_GET_CLASS (op_job->backend);
+  GVfsInfoCache *info_cache = g_vfs_backend_get_info_cache (op_job->backend);
+
+  /* Disable info cache before writing */
+  if (info_cache)
+    {
+      g_vfs_info_cache_disable (info_cache);
+      g_vfs_info_cache_invalidate (info_cache, op_job->filename, FALSE);
+    }
 
   if (class->try_set_attribute == NULL)
     return FALSE;
@@ -165,4 +176,15 @@ create_reply (GVfsJob *job,
               GDBusMethodInvocation *invocation)
 {
   gvfs_dbus_mount_complete_set_attribute (object, invocation);
+}
+
+static void
+finished (GVfsJob *job)
+{
+  GVfsJobSetAttribute *op_job = G_VFS_JOB_SET_ATTRIBUTE (job);
+  GVfsInfoCache *info_cache = g_vfs_backend_get_info_cache (op_job->backend);
+
+  /* Enable info cache after writing */
+  if (info_cache)
+    g_vfs_info_cache_enable (info_cache);
 }

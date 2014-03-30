@@ -32,6 +32,7 @@
 #include <glib/gi18n.h>
 #include "gvfsjobqueryinfo.h"
 #include "gvfsdaemonprotocol.h"
+#include "gvfsinfocache.h"
 
 G_DEFINE_TYPE (GVfsJobQueryInfo, g_vfs_job_query_info, G_VFS_TYPE_JOB_DBUS)
 
@@ -54,7 +55,7 @@ g_vfs_job_query_info_finalize (GObject *object)
   g_free (job->attributes);
   g_file_attribute_matcher_unref (job->attribute_matcher);
   g_free (job->uri);
-  
+
   if (G_OBJECT_CLASS (g_vfs_job_query_info_parent_class)->finalize)
     (*G_OBJECT_CLASS (g_vfs_job_query_info_parent_class)->finalize) (object);
 }
@@ -65,7 +66,7 @@ g_vfs_job_query_info_class_init (GVfsJobQueryInfoClass *klass)
   GObjectClass *gobject_class = G_OBJECT_CLASS (klass);
   GVfsJobClass *job_class = G_VFS_JOB_CLASS (klass);
   GVfsJobDBusClass *job_dbus_class = G_VFS_JOB_DBUS_CLASS (klass);
-  
+
   gobject_class->finalize = g_vfs_job_query_info_finalize;
   job_class->run = run;
   job_class->try = try;
@@ -95,7 +96,6 @@ g_vfs_job_query_info_new_handle (GVfsDBusMount *object,
                       "object", object,
                       "invocation", invocation,
 		      NULL);
-
   job->filename = g_strdup (arg_path_data);
   job->backend = backend;
   job->attributes = g_strdup (arg_attributes);
@@ -138,6 +138,26 @@ try (GVfsJob *job)
 {
   GVfsJobQueryInfo *op_job = G_VFS_JOB_QUERY_INFO (job);
   GVfsBackendClass *class = G_VFS_BACKEND_GET_CLASS (op_job->backend);
+  GVfsInfoCache *info_cache = g_vfs_backend_get_info_cache (op_job->backend);
+  GFileInfo *info;
+
+  /* Look up for cached info */
+  if (info_cache)
+    {
+      info = g_vfs_info_cache_find (info_cache,
+                                    op_job->filename,
+                                    op_job->attribute_matcher,
+                                    op_job->flags);
+      if (info)
+        {
+          g_file_info_copy_into (info, op_job->file_info);
+          g_object_unref (info);
+
+          op_job->cache_hit = TRUE;
+          g_vfs_job_succeeded (G_VFS_JOB (job));
+          return TRUE;
+        }
+    }
 
   if (class->try_query_info == NULL)
     return FALSE;
@@ -157,7 +177,16 @@ create_reply (GVfsJob *job,
               GDBusMethodInvocation *invocation)
 {
   GVfsJobQueryInfo *op_job = G_VFS_JOB_QUERY_INFO (job);
-  
+  GVfsInfoCache *info_cache = g_vfs_backend_get_info_cache (op_job->backend);
+
+  /* Store info into the info cache */
+  if (info_cache && !op_job->cache_hit)
+    g_vfs_info_cache_insert (info_cache,
+                             g_strdup (op_job->filename),
+                             g_file_info_dup (op_job->file_info),
+                             g_file_attribute_matcher_ref (op_job->attribute_matcher),
+                             op_job->flags);
+
   g_vfs_backend_add_auto_info (op_job->backend,
                                op_job->attribute_matcher,
                                op_job->file_info,

@@ -51,6 +51,8 @@ struct _GVfsJobQueryInfo
   char *uri;
 
   GFileInfo *file_info;
+
+  gboolean cache_hit;
 };
 
 struct _GVfsJobQueryInfoClass
