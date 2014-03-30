@@ -15,6 +15,7 @@ noinst_PROGRAMS = \
 	benchmark-posix-small-files   \
 	benchmark-posix-big-files     \
 	test-info-cache-structure     \
+	test-info-cache-integration   \
 	$(NULL)
 
 test_info_cache_structure_SOURCES = \
