@@ -29,8 +29,7 @@ typedef struct _GVfsInfoCache GVfsInfoCache;
 
 /*
  * N.B.: Max time should be set if virtual filesystem isn't readonly or
- * mutual excluded. Max count also should be set to limit memory
- * requirements, because invalid items isn't automatically removed. 
+ * mutual excluded.
  */
 
 GVfsInfoCache * g_vfs_info_cache_new         (guint max_count,

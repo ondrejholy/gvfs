@@ -40,6 +40,10 @@ struct _GVfsInfoCache
   GHashTable *hash;
   GQueue *lru;
 
+  GQueue *gc;
+  gint64 gc_stamp;
+  guint gc_interval;
+
   GMutex lock;
   gint disable_count;
 };
@@ -53,6 +57,7 @@ struct _GVfsInfoCacheEntry
   gint64 stamp;
 
   GList *lru_link;
+  GList *gc_link;
 };
 
 /* Release memory of the cache entry */
@@ -139,6 +144,11 @@ g_vfs_info_cache_remove_internal (GVfsInfoCache *cache,
       g_queue_delete_link (cache->lru, entry->lru_link);
     }
 
+    if (entry->gc_link)
+    {
+      g_queue_delete_link (cache->gc, entry->gc_link);
+    }
+
     g_hash_table_remove (cache->hash, path);
   }
 }
@@ -151,6 +161,9 @@ g_vfs_info_cache_remove_all_internal (GVfsInfoCache *cache)
 
   g_hash_table_remove_all (cache->hash);
   g_queue_clear (cache->lru);
+  g_queue_clear (cache->gc);
+
+  cache->gc_stamp = g_get_real_time ();
 }
 
 /* Remove lru entry from cache if needed */
@@ -165,6 +178,42 @@ g_vfs_info_cache_remove_lru (GVfsInfoCache *cache)
   {
     path = g_queue_peek_head (cache->lru);
     g_vfs_info_cache_remove_internal (cache, path, NULL);
+  }
+}
+
+/* Remove invalid entries from the cache */
+static void
+g_vfs_info_cache_garbage_collector (GVfsInfoCache *cache)
+{
+  GVfsInfoCacheEntry *entry;
+  const gchar *path;
+  gint64 time;
+
+  g_assert (cache != NULL);
+
+  time = g_get_real_time ();
+  if (cache->gc_interval && time - cache->gc_stamp > cache->gc_interval)
+  {
+    while (TRUE)
+    {
+      path = g_queue_peek_head (cache->gc);
+      if (!path)
+      {
+        break;
+      }
+
+      entry = g_hash_table_lookup (cache->hash, path);
+      if (entry && time - entry->stamp > cache->max_time)
+      {
+        g_vfs_info_cache_remove_internal (cache, path, entry);
+      }
+      else
+      {
+        break;
+      }
+    }
+
+    cache->gc_stamp = time;
   }
 }
 
@@ -194,6 +243,10 @@ g_vfs_info_cache_new (guint max_count,
                                        (GDestroyNotify)g_vfs_info_cache_entry_free);
   cache->lru = g_queue_new ();
 
+  cache->gc = g_queue_new ();
+  cache->gc_stamp = g_get_real_time ();
+  cache->gc_interval = cache->max_time / 2;
+
   g_mutex_init (&cache->lock);
 
   return cache;
@@ -212,6 +265,7 @@ g_vfs_info_cache_free (GVfsInfoCache *cache)
 
   g_hash_table_destroy (cache->hash);
   g_queue_free (cache->lru);
+  g_queue_free (cache->gc);
   g_mutex_clear (&cache->lock);
 
   g_slice_free (GVfsInfoCache, cache);
@@ -270,6 +324,8 @@ g_vfs_info_cache_insert (GVfsInfoCache *cache,
 
   g_debug ("info_cache_insert: %s\n", path);
 
+  /* Remove invalid entries */
+  g_vfs_info_cache_garbage_collector (cache);
 
   /* Remove current entry if exists */
   g_vfs_info_cache_remove_internal (cache, path, NULL);
@@ -284,6 +340,8 @@ g_vfs_info_cache_insert (GVfsInfoCache *cache,
   g_queue_push_tail (cache->lru, path);
   entry->lru_link = g_queue_peek_tail_link (cache->lru);
 
+  g_queue_push_tail (cache->gc, path);
+  entry->gc_link = g_queue_peek_tail_link (cache->gc);
 
   g_hash_table_insert (cache->hash, path, entry);
 
@@ -319,6 +377,9 @@ g_vfs_info_cache_find (GVfsInfoCache *cache,
   g_assert (matcher != NULL);
 
   g_mutex_lock (&cache->lock);
+
+  /* Remove invalid entries */
+  g_vfs_info_cache_garbage_collector (cache);
 
   entry = g_hash_table_lookup (cache->hash, path);
   if (entry && g_vfs_info_cache_is_entry_valid (cache, entry, matcher, flags))
@@ -368,6 +429,9 @@ g_vfs_info_cache_invalidate (GVfsInfoCache *cache,
 
   g_debug ("info_cache_invalidate\n");
 
+  /* Remove invalid entries */
+  g_vfs_info_cache_garbage_collector (cache);
+
   /* Try to determine file type */
   if (maybe_dir)
   {
@@ -412,7 +476,7 @@ g_vfs_info_cache_remove (GVfsInfoCache *cache, const gchar *path)
   g_assert (cache != NULL);
   g_assert (path != NULL);
 
-  g_debug ("info_cache_remove\n");
+  g_debug ("info_cache_remove: %s\n", path);
 
   g_mutex_lock (&cache->lock);
   g_vfs_info_cache_remove_internal (cache, path, NULL);
