@@ -31,6 +31,7 @@
 #include <glib/gi18n.h>
 #include "gvfsjobsetdisplayname.h"
 #include "gvfsinfocache.h"
+#include "gvfsenumerationcache.h"
 
 G_DEFINE_TYPE (GVfsJobSetDisplayName, g_vfs_job_set_display_name, G_VFS_TYPE_JOB_DBUS)
 
@@ -127,12 +128,19 @@ try (GVfsJob *job)
   GVfsJobSetDisplayName *op_job = G_VFS_JOB_SET_DISPLAY_NAME (job);
   GVfsBackendClass *class = G_VFS_BACKEND_GET_CLASS (op_job->backend);
   GVfsInfoCache *info_cache = g_vfs_backend_get_info_cache (op_job->backend);
+  GVfsEnumerationCache *enumeration_cache = g_vfs_backend_get_enumeration_cache (op_job->backend);
+  gboolean maybe_dir = TRUE;
 
-  /* Disable info cache before writing */
+  /* Disable caches before writing */
   if (info_cache)
     {
       g_vfs_info_cache_disable (info_cache);
-      g_vfs_info_cache_invalidate (info_cache, op_job->filename, TRUE);
+      maybe_dir = g_vfs_info_cache_invalidate (info_cache, op_job->filename, TRUE);
+    }
+  if (enumeration_cache)
+    {
+      g_vfs_enumeration_cache_disable (enumeration_cache);
+      g_vfs_enumeration_cache_invalidate (enumeration_cache, op_job->filename, maybe_dir);
     }
 
   if (class->try_set_display_name == NULL)
@@ -169,8 +177,11 @@ finished (GVfsJob *job)
 {
   GVfsJobSetDisplayName *op_job = G_VFS_JOB_SET_DISPLAY_NAME (job);
   GVfsInfoCache *info_cache = g_vfs_backend_get_info_cache (op_job->backend);
+  GVfsEnumerationCache *enumeration_cache = g_vfs_backend_get_enumeration_cache (op_job->backend);
 
-  /* Enable info cache after writing */
+  /* Enable caches after writing */
   if (info_cache)
     g_vfs_info_cache_enable (info_cache);
+  if (enumeration_cache)
+    g_vfs_enumeration_cache_enable (enumeration_cache);
 }

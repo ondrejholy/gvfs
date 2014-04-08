@@ -53,6 +53,10 @@ struct _GVfsJobEnumerate
 
   GVariantBuilder *building_infos;
   int n_building_infos;
+
+  GList *cache_infos;
+  gboolean cache_hit;
+  gint64 cache_stamp;
 };
 
 struct _GVfsJobEnumerateClass

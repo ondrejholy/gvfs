@@ -58,6 +58,7 @@
 #include <gvfsjobqueryattributes.h>
 #include <gvfsdbus.h>
 #include "gvfsinfocache.h"
+#include "gvfsenumerationcache.h"
 
 enum {
   PROP_0,
@@ -82,6 +83,7 @@ struct _GVfsBackendPrivate
   GMountSpec *mount_spec;
   gboolean block_requests;
   GVfsInfoCache *info_cache;
+  GVfsEnumerationCache *enumeration_cache;
 };
 
 
@@ -158,7 +160,9 @@ g_vfs_backend_finalize (GObject *object)
     g_mount_spec_unref (backend->priv->mount_spec);
   if (backend->priv->info_cache)
     g_vfs_info_cache_free (backend->priv->info_cache);
-  
+  if (backend->priv->enumeration_cache)
+    g_vfs_enumeration_cache_free (backend->priv->enumeration_cache);
+
   if (G_OBJECT_CLASS (g_vfs_backend_parent_class)->finalize)
     (*G_OBJECT_CLASS (g_vfs_backend_parent_class)->finalize) (object);
 }
@@ -210,6 +214,7 @@ g_vfs_backend_init (GVfsBackend *backend)
   backend->priv->user_visible = TRUE;
   backend->priv->default_location = g_strdup ("");
   backend->priv->info_cache = NULL;
+  backend->priv->enumeration_cache = NULL;
 }
 
 static void
@@ -477,6 +482,15 @@ g_vfs_backend_set_info_cache (GVfsBackend *backend,
   backend->priv->info_cache = info_cache;
 }
 
+void
+g_vfs_backend_set_enumeration_cache (GVfsBackend *backend,
+                                     GVfsEnumerationCache *enumeration_cache)
+{
+  if (backend->priv->enumeration_cache)
+    g_vfs_enumeration_cache_free (backend->priv->enumeration_cache);
+  backend->priv->enumeration_cache = enumeration_cache;
+}
+
 const char *
 g_vfs_backend_get_backend_type (GVfsBackend *backend)
 {
@@ -531,6 +545,12 @@ GVfsInfoCache *
 g_vfs_backend_get_info_cache (GVfsBackend *backend)
 {
   return backend->priv->info_cache;
+}
+
+GVfsEnumerationCache *
+g_vfs_backend_get_enumeration_cache (GVfsBackend *backend)
+{
+  return backend->priv->enumeration_cache;
 }
 
 static void

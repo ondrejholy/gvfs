@@ -33,6 +33,7 @@
 #include "gvfsdaemonprotocol.h"
 #include <gvfsdbus.h>
 #include "gvfsinfocache.h"
+#include "gvfsenumerationcache.h"
 
 G_DEFINE_TYPE (GVfsJobEnumerate, g_vfs_job_enumerate, G_VFS_TYPE_JOB_DBUS)
 
@@ -42,6 +43,7 @@ static void         send_reply   (GVfsJob        *job);
 static void         create_reply (GVfsJob               *job,
                                   GVfsDBusMount         *object,
                                   GDBusMethodInvocation *invocation);
+static void         finished     (GVfsJob *job);
 
 static void
 g_vfs_job_enumerate_finalize (GObject *object)
@@ -71,6 +73,7 @@ g_vfs_job_enumerate_class_init (GVfsJobEnumerateClass *klass)
   job_class->run = run;
   job_class->try = try;
   job_class->send_reply = send_reply;
+  job_class->finished = finished;
   job_dbus_class->create_reply = create_reply;
 }
 
@@ -175,6 +178,8 @@ g_vfs_job_enumerate_add_info (GVfsJobEnumerate *job,
   char *uri, *escaped_name, *filename;
   GVariant *v;
   GVfsInfoCache *info_cache = g_vfs_backend_get_info_cache (job->backend);
+  GVfsEnumerationCache *enumeration_cache = g_vfs_backend_get_enumeration_cache (job->backend);
+  GFileInfo *cache_info;
 
   if (job->building_infos == NULL)
     {
@@ -193,18 +198,31 @@ g_vfs_job_enumerate_add_info (GVfsJobEnumerate *job,
       g_free (escaped_name);
     }
 
-  /* Store info into the info cache */
-  if (info_cache)
+  /* Store info into the caches */
+  if ((info_cache || enumeration_cache) && !job->cache_hit)
     {
-      filename = g_build_path ("/",
-                               job->filename,
-                               g_file_info_get_name (info),
-                               NULL);
-      g_vfs_info_cache_insert (info_cache,
-                               filename,
-                               g_file_info_dup (info),
-                               g_file_attribute_matcher_ref (job->attribute_matcher),
-                               job->flags);
+      cache_info = g_file_info_dup (info);
+
+      if (info_cache)
+        {
+          filename = g_build_path ("/",
+                                   job->filename,
+                                   g_file_info_get_name (info),
+                                   NULL);
+          g_vfs_info_cache_insert (info_cache,
+                                   filename,
+                                   g_object_ref (cache_info),
+                                   g_file_attribute_matcher_ref (job->attribute_matcher),
+                                   job->flags);
+        }
+
+      if (enumeration_cache)
+        {
+          job->cache_infos = g_list_append (job->cache_infos,
+                                            g_object_ref (cache_info));
+        }
+
+      g_object_unref (cache_info);
     }
   
   g_vfs_backend_add_auto_info (job->backend,
@@ -299,6 +317,34 @@ try (GVfsJob *job)
 {
   GVfsJobEnumerate *op_job = G_VFS_JOB_ENUMERATE (job);
   GVfsBackendClass *class = G_VFS_BACKEND_GET_CLASS (op_job->backend);
+  GVfsEnumerationCache *enumeration_cache = g_vfs_backend_get_enumeration_cache (op_job->backend);
+  GList *infos;
+  guint count = G_MAXUINT;
+
+  /* Look up for cached enumeration */
+  if (enumeration_cache)
+    {
+      infos = g_vfs_enumeration_cache_find (enumeration_cache,
+                                            op_job->filename,
+                                            op_job->attribute_matcher,
+                                            op_job->flags,
+                                            &count);
+      if (infos || !count)
+        {
+          op_job->cache_hit = TRUE;
+
+          g_vfs_job_enumerate_add_infos (op_job, infos);
+          g_list_free_full (infos, g_object_unref);
+
+          g_vfs_job_enumerate_done (op_job);
+          g_vfs_job_succeeded (job);
+
+          return TRUE;
+        }
+
+      op_job->cache_stamp = g_vfs_enumeration_cache_insert (enumeration_cache,
+                                                            g_strdup (op_job->filename));
+    }
 
   if (class->try_enumerate == NULL)
     return FALSE;
@@ -336,4 +382,30 @@ create_reply (GVfsJob *job,
               GDBusMethodInvocation *invocation)
 {
   gvfs_dbus_mount_complete_enumerate (object, invocation);
+}
+
+static void
+finished (GVfsJob *job)
+{
+  GVfsJobEnumerate *op_job = G_VFS_JOB_ENUMERATE (job);
+  GVfsEnumerationCache *enumeration_cache = g_vfs_backend_get_enumeration_cache (op_job->backend);
+
+  /* Store enumeration into the enumeration cache */
+  if (enumeration_cache && !op_job->cache_hit)
+    {
+      if (job->failed)
+        {
+          g_list_free_full (op_job->cache_infos, g_object_unref);
+          g_vfs_enumeration_cache_remove (enumeration_cache, op_job->filename);
+        }
+      else
+        {
+          g_vfs_enumeration_cache_set (enumeration_cache,
+                                       op_job->filename,
+                                       op_job->cache_infos,
+                                       g_file_attribute_matcher_ref (op_job->attribute_matcher),
+                                       op_job->flags,
+                                       op_job->cache_stamp);
+        }
+    }
 }

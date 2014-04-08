@@ -28,6 +28,7 @@
 #include <gvfsjob.h>
 #include <gmountspec.h>
 #include "gvfsinfocache.h"
+#include "gvfsenumerationcache.h"
 
 G_BEGIN_DECLS
 
@@ -491,6 +492,8 @@ void        g_vfs_backend_set_mount_spec                 (GVfsBackend        *ba
 							  GMountSpec         *mount_spec);
 void        g_vfs_backend_set_info_cache                 (GVfsBackend        *backend,
 							  GVfsInfoCache      *cache);
+void        g_vfs_backend_set_enumeration_cache          (GVfsBackend        *backend,
+							  GVfsEnumerationCache *cache);
 void        g_vfs_backend_register_mount                 (GVfsBackend        *backend,
                                                           GAsyncReadyCallback callback,
 							  gpointer            user_data);
@@ -507,6 +510,7 @@ const char *g_vfs_backend_get_default_location           (GVfsBackend        *ba
 GMountSpec *g_vfs_backend_get_mount_spec                 (GVfsBackend        *backend);
 GVfsDaemon *g_vfs_backend_get_daemon                     (GVfsBackend        *backend);
 GVfsInfoCache *g_vfs_backend_get_info_cache              (GVfsBackend        *backend);
+GVfsEnumerationCache *g_vfs_backend_get_enumeration_cache(GVfsBackend        *backend);
 gboolean    g_vfs_backend_is_mounted                     (GVfsBackend        *backend);
 void        g_vfs_backend_force_unmount                  (GVfsBackend        *backend);
 

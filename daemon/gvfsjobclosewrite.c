@@ -33,6 +33,7 @@
 #include "gvfsjobclosewrite.h"
 #include "gvfsdaemonutils.h"
 #include "gvfsinfocache.h"
+#include "gvfsenumerationcache.h"
 
 G_DEFINE_TYPE (GVfsJobCloseWrite, g_vfs_job_close_write, G_VFS_TYPE_JOB)
 
@@ -148,8 +149,11 @@ finished (GVfsJob *job)
 {
   GVfsJobCloseWrite *op_job = G_VFS_JOB_CLOSE_WRITE (job);
   GVfsInfoCache *info_cache = g_vfs_backend_get_info_cache (op_job->backend);
+  GVfsEnumerationCache *enumeration_cache = g_vfs_backend_get_enumeration_cache (op_job->backend);
 
-  /* Enable info cache after writing */
+  /* Enable caches after writing */
   if (info_cache)
     g_vfs_info_cache_enable (info_cache);
+  if (enumeration_cache)
+    g_vfs_enumeration_cache_enable (enumeration_cache);
 }

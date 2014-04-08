@@ -32,6 +32,7 @@
 #include "gvfsjobmakedirectory.h"
 #include "gvfsdaemonprotocol.h"
 #include "gvfsinfocache.h"
+#include "gvfsenumerationcache.h"
 
 G_DEFINE_TYPE (GVfsJobMakeDirectory, g_vfs_job_make_directory, G_VFS_TYPE_JOB_DBUS)
 
@@ -123,12 +124,18 @@ try (GVfsJob *job)
   GVfsJobMakeDirectory *op_job = G_VFS_JOB_MAKE_DIRECTORY (job);
   GVfsBackendClass *class = G_VFS_BACKEND_GET_CLASS (op_job->backend);
   GVfsInfoCache *info_cache = g_vfs_backend_get_info_cache (op_job->backend);
+  GVfsEnumerationCache *enumeration_cache = g_vfs_backend_get_enumeration_cache (op_job->backend);
 
-  /* Disable info cache before writing */
+  /* Disable caches before writing */
   if (info_cache)
     {
       g_vfs_info_cache_disable (info_cache);
       g_vfs_info_cache_invalidate (info_cache, op_job->filename, FALSE);
+    }
+  if (enumeration_cache)
+    {
+      g_vfs_enumeration_cache_disable (enumeration_cache);
+      g_vfs_enumeration_cache_invalidate (enumeration_cache, op_job->filename, FALSE);
     }
 
   if (class->try_make_directory == NULL)
@@ -153,8 +160,11 @@ finished (GVfsJob *job)
 {
   GVfsJobMakeDirectory *op_job = G_VFS_JOB_MAKE_DIRECTORY (job);
   GVfsInfoCache *info_cache = g_vfs_backend_get_info_cache (op_job->backend);
+  GVfsEnumerationCache *enumeration_cache = g_vfs_backend_get_enumeration_cache (op_job->backend);
 
-  /* Enable info cache after writing */
+  /* Enable caches after writing */
   if (info_cache)
     g_vfs_info_cache_enable (info_cache);
+  if (enumeration_cache)
+    g_vfs_enumeration_cache_enable (enumeration_cache);
 }
