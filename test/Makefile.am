@@ -14,6 +14,7 @@ noinst_PROGRAMS = \
 	benchmark-gvfs-big-files      \
 	benchmark-posix-small-files   \
 	benchmark-posix-big-files     \
+	test-file-cache-integration   \
 	$(NULL)
 
 session.conf: session.conf.in ../config.log
