@@ -32,6 +32,7 @@
 #include "gvfsreadchannel.h"
 #include "gvfsjobqueryinforead.h"
 #include "gvfsdaemonutils.h"
+#include "gvfsfilecache.h"
 
 G_DEFINE_TYPE (GVfsJobQueryInfoRead, g_vfs_job_query_info_read, G_VFS_TYPE_JOB)
 
@@ -112,8 +113,9 @@ run (GVfsJob *job)
 {
   GVfsJobQueryInfoRead *op_job = G_VFS_JOB_QUERY_INFO_READ (job);
   GVfsBackendClass *class = G_VFS_BACKEND_GET_CLASS (op_job->backend);
+  GVfsFileCache *file_cache = g_vfs_backend_get_file_cache (op_job->backend);
 
-  if (class->query_info_on_read == NULL)
+  if (class->query_info_on_read == NULL || file_cache)
     {
       g_vfs_job_failed (job, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
 			_("Operation not supported by backend"));
@@ -132,8 +134,9 @@ try (GVfsJob *job)
 {
   GVfsJobQueryInfoRead *op_job = G_VFS_JOB_QUERY_INFO_READ (job);
   GVfsBackendClass *class = G_VFS_BACKEND_GET_CLASS (op_job->backend);
+  GVfsFileCache *file_cache = g_vfs_backend_get_file_cache (op_job->backend);
 
-  if (class->try_query_info_on_read == NULL)
+  if (class->try_query_info_on_read == NULL || file_cache)
     return FALSE;
   
   return class->try_query_info_on_read (op_job->backend,

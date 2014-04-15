@@ -110,10 +110,12 @@ g_vfs_job_dbus_set_property (GObject         *object,
   switch (prop_id)
     {
     case PROP_INVOCATION:
-      job->invocation = g_object_ref (g_value_get_pointer (value));
+      if (g_value_get_pointer (value))
+        job->invocation = g_object_ref (g_value_get_pointer (value));
       break;
     case PROP_OBJECT:
-      job->object = g_object_ref (g_value_get_pointer (value));
+      if (g_value_get_pointer (value))
+        job->object = g_object_ref (g_value_get_pointer (value));
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -154,10 +156,13 @@ send_reply (GVfsJob *job)
   
   class = G_VFS_JOB_DBUS_GET_CLASS (job);
   
-  if (job->failed)
-    g_dbus_method_invocation_return_gerror (dbus_job->invocation, job->error);
-  else
-    class->create_reply (job, dbus_job->object, dbus_job->invocation);
+  if (dbus_job->object && dbus_job->invocation)
+    {
+      if (job->failed)
+        g_dbus_method_invocation_return_gerror (dbus_job->invocation, job->error);
+      else
+        class->create_reply (job, dbus_job->object, dbus_job->invocation);
+    }
  
   g_vfs_job_emit_finished (job);
 }
@@ -169,7 +174,10 @@ g_vfs_job_dbus_is_serial (GVfsJobDBus *job_dbus,
 {
   GDBusMessage *message;
   GDBusConnection *message_connection;
-  
+
+  if (!job_dbus->invocation)
+    return FALSE;
+
   message = g_dbus_method_invocation_get_message (job_dbus->invocation);
   message_connection = g_dbus_method_invocation_get_connection (job_dbus->invocation);
   

@@ -57,6 +57,7 @@
 #include <gvfsjobsetattribute.h>
 #include <gvfsjobqueryattributes.h>
 #include <gvfsdbus.h>
+#include "gvfsfilecache.h"
 
 enum {
   PROP_0,
@@ -80,6 +81,7 @@ struct _GVfsBackendPrivate
   char *default_location;
   GMountSpec *mount_spec;
   gboolean block_requests;
+  GVfsFileCache *file_cache;
 };
 
 
@@ -154,7 +156,9 @@ g_vfs_backend_finalize (GObject *object)
   g_free (backend->priv->default_location);
   if (backend->priv->mount_spec)
     g_mount_spec_unref (backend->priv->mount_spec);
-  
+  if (backend->priv->file_cache)
+    g_vfs_file_cache_free (backend->priv->file_cache);
+
   if (G_OBJECT_CLASS (g_vfs_backend_parent_class)->finalize)
     (*G_OBJECT_CLASS (g_vfs_backend_parent_class)->finalize) (object);
 }
@@ -205,6 +209,7 @@ g_vfs_backend_init (GVfsBackend *backend)
   backend->priv->stable_name = g_strdup ("");
   backend->priv->user_visible = TRUE;
   backend->priv->default_location = g_strdup ("");
+  backend->priv->file_cache = NULL;
 }
 
 static void
@@ -463,6 +468,15 @@ g_vfs_backend_set_mount_spec (GVfsBackend *backend,
   backend->priv->mount_spec = g_mount_spec_ref (mount_spec);
 }
 
+void
+g_vfs_backend_set_file_cache (GVfsBackend *backend,
+                              GVfsFileCache *file_cache)
+{
+  if (backend->priv->file_cache)
+    g_vfs_file_cache_free (backend->priv->file_cache);
+  backend->priv->file_cache = file_cache;
+}
+
 const char *
 g_vfs_backend_get_backend_type (GVfsBackend *backend)
 {
@@ -511,6 +525,12 @@ GMountSpec *
 g_vfs_backend_get_mount_spec (GVfsBackend *backend)
 {
   return backend->priv->mount_spec;
+}
+
+GVfsFileCache *
+g_vfs_backend_get_file_cache (GVfsBackend *backend)
+{
+  return backend->priv->file_cache;
 }
 
 static void

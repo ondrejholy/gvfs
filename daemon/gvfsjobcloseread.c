@@ -32,6 +32,7 @@
 #include "gvfsreadchannel.h"
 #include "gvfsjobcloseread.h"
 #include "gvfsdaemonutils.h"
+#include "gvfsfilecache.h"
 
 G_DEFINE_TYPE (GVfsJobCloseRead, g_vfs_job_close_read, G_VFS_TYPE_JOB)
 
@@ -123,7 +124,15 @@ try (GVfsJob *job)
 {
   GVfsJobCloseRead *op_job = G_VFS_JOB_CLOSE_READ (job);
   GVfsBackendClass *class = G_VFS_BACKEND_GET_CLASS (op_job->backend);
-  
+  GVfsFileCache *file_cache = g_vfs_backend_get_file_cache (op_job->backend);
+
+  /* Try file cache first */
+  if (file_cache)
+    {
+      g_vfs_file_cache_close_read (file_cache, op_job);
+      return TRUE;
+    }
+
   if (class->try_close_read == NULL)
     return FALSE;
   

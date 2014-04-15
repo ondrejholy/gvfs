@@ -33,6 +33,7 @@
 #include "gvfsreadchannel.h"
 #include "gvfsjobopenforread.h"
 #include "gvfsdaemonutils.h"
+#include "gvfsfilecache.h"
 
 G_DEFINE_TYPE (GVfsJobOpenForRead, g_vfs_job_open_for_read, G_VFS_TYPE_JOB_DBUS)
 
@@ -131,6 +132,14 @@ try (GVfsJob *job)
 {
   GVfsJobOpenForRead *op_job = G_VFS_JOB_OPEN_FOR_READ (job);
   GVfsBackendClass *class = G_VFS_BACKEND_GET_CLASS (op_job->backend);
+  GVfsFileCache *file_cache = g_vfs_backend_get_file_cache (op_job->backend);
+
+  /* Try file cache first */
+  if (file_cache)
+    {
+      g_vfs_file_cache_open_for_read (file_cache, op_job);
+      return TRUE;
+    }
 
   if (class->try_open_for_read == NULL)
     return FALSE;

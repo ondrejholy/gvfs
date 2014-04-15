@@ -112,6 +112,29 @@ g_vfs_job_pull_new_handle (GVfsDBusMount *object,
   return TRUE;
 }
 
+GVfsJob *
+g_vfs_job_pull_new (const gchar *arg_path_data,
+                    const gchar *arg_local_path,
+                    guint arg_flags,
+                    gboolean arg_remove_source,
+                    GVfsBackend *backend)
+{
+  GVfsJobPull *job;
+  GVfsJobProgress *progress_job;
+
+  job = g_object_new (G_VFS_TYPE_JOB_PULL, NULL);
+  progress_job = G_VFS_JOB_PROGRESS (job);
+
+  job->source = g_strdup (arg_path_data);
+  job->local_path = g_strdup (arg_local_path);
+  job->backend = backend;
+  job->flags = arg_flags;
+  progress_job->send_progress = FALSE;
+  job->remove_source = arg_remove_source;
+
+  return G_VFS_JOB (job);
+}
+
 static void
 run (GVfsJob *job)
 {

@@ -68,6 +68,12 @@ gboolean g_vfs_job_pull_new_handle (GVfsDBusMount         *object,
                                     gboolean               arg_remove_source,
                                     GVfsBackend           *backend);
 
+GVfsJob *g_vfs_job_pull_new        (const gchar           *arg_path_data,
+                                    const gchar           *arg_local_path,
+                                    guint                  arg_flags,
+                                    gboolean               arg_remove_source,
+                                    GVfsBackend           *backend);
+
 G_END_DECLS
 
 #endif /* __G_VFS_JOB_PULL_H__ */
