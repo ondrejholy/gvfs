@@ -62,6 +62,7 @@
 #include "gvfsmonitor.h"
 #include "gvfsjobseekwrite.h"
 #include "gvfsicon.h"
+#include "gvfsfilecache.h"
 
 /* showing debug traces */
 #if 1
@@ -667,6 +668,8 @@ g_vfs_backend_gphoto2_init (GVfsBackendGphoto2 *gphoto2_backend)
 {
   GVfsBackend *backend = G_VFS_BACKEND (gphoto2_backend);
   GMountSpec *mount_spec;
+  GVfsFileCache *file_cache;
+  const gchar *env;
 
   DEBUG ("initing %p", gphoto2_backend);
 
@@ -681,6 +684,13 @@ g_vfs_backend_gphoto2_init (GVfsBackendGphoto2 *gphoto2_backend)
 #ifdef DEBUG_SHOW_LIBGPHOTO2_OUTPUT
   gp_log_add_func (GP_LOG_ALL, _gphoto2_logger_func, NULL);
 #endif
+
+  env = g_getenv ("GVFS_CACHE");
+  if (g_strcmp0 (env, "1") == 0)
+    {
+      file_cache = g_vfs_file_cache_new ();
+      g_vfs_backend_set_file_cache (G_VFS_BACKEND (backend), file_cache);
+    }
 }
 
 /* ------------------------------------------------------------------------------------------------- */
@@ -1810,247 +1820,6 @@ try_mount (GVfsBackend *backend,
   g_vfs_backend_set_mount_spec (backend, gphoto2_mount_spec);
   g_mount_spec_unref (gphoto2_mount_spec);
   return FALSE;
-}
-
-/* ------------------------------------------------------------------------------------------------- */
-
-static void
-free_read_handle (ReadHandle *read_handle)
-{
-  if (read_handle->file != NULL)
-    {
-      gp_file_unref (read_handle->file);
-    }
-  g_free (read_handle);
-}
-
-static void
-do_open_for_read_real (GVfsBackend *backend,
-                       GVfsJobOpenForRead *job,
-                       const char *filename,
-                       gboolean get_preview)
-{
-  int rc;
-  GError *error;
-  ReadHandle *read_handle;
-  GVfsBackendGphoto2 *gphoto2_backend = G_VFS_BACKEND_GPHOTO2 (backend);
-  char *dir;
-  char *name;
-
-  ensure_not_dirty (gphoto2_backend);
-
-  split_filename_with_ignore_prefix (gphoto2_backend, filename, &dir, &name);
-
-  if (is_directory (gphoto2_backend, dir, name))
-    {
-      g_vfs_job_failed (G_VFS_JOB (job), G_IO_ERROR,
-                        G_IO_ERROR_IS_DIRECTORY,
-                        _("Can't open directory"));
-      goto out;
-    }
-
-  if (!is_regular (gphoto2_backend, dir, name))
-    {
-      g_vfs_job_failed (G_VFS_JOB (job), G_IO_ERROR,
-                        G_IO_ERROR_NOT_FOUND,
-                        _("No such file"));
-      goto out;
-    }
-
-  read_handle = g_new0 (ReadHandle, 1);
-  rc = gp_file_new (&read_handle->file);
-  if (rc != 0)
-    {
-      error = get_error_from_gphoto2 (_("Error creating file object"), rc);
-      g_vfs_job_failed_from_error (G_VFS_JOB (job), error);
-      g_error_free (error);
-      free_read_handle (read_handle);
-      goto out;
-    }
-
-  rc = gp_camera_file_get (gphoto2_backend->camera,
-                           dir,
-                           name,
-                           get_preview ? GP_FILE_TYPE_PREVIEW : GP_FILE_TYPE_NORMAL,
-                           read_handle->file,
-                           gphoto2_backend->context);
-  if (rc != 0)
-    {
-      error = get_error_from_gphoto2 (_("Error getting file"), rc);
-      g_vfs_job_failed_from_error (G_VFS_JOB (job), error);
-      g_error_free (error);
-      free_read_handle (read_handle);
-      goto out;
-    }
-
-  rc = gp_file_get_data_and_size (read_handle->file, &read_handle->data, &read_handle->size);
-  if (rc != 0)
-    {
-      error = get_error_from_gphoto2 (_("Error getting data from file"), rc);
-      g_vfs_job_failed_from_error (G_VFS_JOB (job), error);
-      g_error_free (error);
-      free_read_handle (read_handle);
-      goto out;
-    }
-
-  DEBUG ("  data=%p size=%ld handle=%p get_preview=%d",
-         read_handle->data, read_handle->size, read_handle, get_preview);
-
-  g_mutex_lock (&gphoto2_backend->lock);
-  gphoto2_backend->open_read_handles = g_list_prepend (gphoto2_backend->open_read_handles, read_handle);
-  g_mutex_unlock (&gphoto2_backend->lock);
-      
-  read_handle->cursor = 0;
-
-  g_vfs_job_open_for_read_set_can_seek (job, TRUE);
-  g_vfs_job_open_for_read_set_handle (job, GINT_TO_POINTER (read_handle));
-  g_vfs_job_succeeded (G_VFS_JOB (job));
-
- out:
-  g_free (name);
-  g_free (dir);
-}
-
-
-static void
-do_open_for_read (GVfsBackend *backend,
-                  GVfsJobOpenForRead *job,
-                  const char *filename)
-{
-  DEBUG ("open_for_read (%s)", filename);
-
-  do_open_for_read_real (backend,
-                         job,
-                         filename,
-                         FALSE);
-}
-
-static void
-do_open_icon_for_read (GVfsBackend *backend,
-                       GVfsJobOpenIconForRead *job,
-                       const char *icon_id)
-{
-  DEBUG ("open_icon_for_read (%s)", icon_id);
-
-  if (g_str_has_prefix (icon_id, "preview:"))
-    {
-      do_open_for_read_real (backend,
-                             G_VFS_JOB_OPEN_FOR_READ (job),
-                             icon_id + sizeof ("preview:") - 1,
-                             TRUE);
-    }
-  else
-    {
-      g_vfs_job_failed (G_VFS_JOB (job),
-                        G_IO_ERROR,
-                        G_IO_ERROR_INVALID_ARGUMENT,
-                        _("Malformed icon identifier '%s'"),
-                        icon_id);
-    }
-}
-
-/* ------------------------------------------------------------------------------------------------- */
-
-static gboolean
-try_read (GVfsBackend *backend,
-          GVfsJobRead *job,
-          GVfsBackendHandle handle,
-          char *buffer,
-          gsize bytes_requested)
-{
-  //GVfsBackendGphoto2 *gphoto2_backend = G_VFS_BACKEND_GPHOTO2 (backend);
-  ReadHandle *read_handle = (ReadHandle *) handle;
-  gsize bytes_left;
-  gsize bytes_to_copy;
-
-  DEBUG ("do_read() %d @ %ld of %ld, handle=%p", bytes_requested, read_handle->cursor, read_handle->size, handle);
-
-  if (read_handle->cursor >= read_handle->size)
-    {
-      bytes_to_copy = 0;
-      goto out;
-    }
-  
-  bytes_left = read_handle->size - read_handle->cursor;
-  if (bytes_requested > bytes_left)
-    bytes_to_copy = bytes_left;
-  else
-    bytes_to_copy = bytes_requested;
-
-  memcpy (buffer, read_handle->data + read_handle->cursor, bytes_to_copy);
-  read_handle->cursor += bytes_to_copy;
-
- out:
-  
-  g_vfs_job_read_set_size (job, bytes_to_copy);
-  g_vfs_job_succeeded (G_VFS_JOB (job));
-  return TRUE;
-}
-
-/* ------------------------------------------------------------------------------------------------- */
-
-static gboolean
-try_seek_on_read (GVfsBackend *backend,
-                  GVfsJobSeekRead *job,
-                  GVfsBackendHandle handle,
-                  goffset    offset,
-                  GSeekType  type)
-{
-  GVfsBackendGphoto2 *gphoto2_backend = G_VFS_BACKEND_GPHOTO2 (backend);
-  ReadHandle *read_handle = (ReadHandle *) handle;
-  long new_offset;
-
-  DEBUG ("seek_on_read() offset=%d, type=%d, handle=%p", (int)offset, type, handle);
-
-  switch (type)
-    {
-    default:
-    case G_SEEK_SET:
-      new_offset = offset;
-      break;
-    case G_SEEK_CUR:
-      new_offset = read_handle->cursor + offset;
-      break;
-    case G_SEEK_END:
-      new_offset = read_handle->size + offset;
-      break;
-    }
-
-  if (new_offset < 0)
-    {
-      g_vfs_job_failed (G_VFS_JOB (job), G_IO_ERROR,
-                        G_IO_ERROR_FAILED,
-                        _("Error seeking in stream on camera %s"), gphoto2_backend->gphoto2_port);
-    }
-  else
-    {
-      read_handle->cursor = new_offset;
-      g_vfs_job_seek_read_set_offset (job, new_offset);
-      g_vfs_job_succeeded (G_VFS_JOB (job));
-    }
-  return TRUE;
-}
-
-/* ------------------------------------------------------------------------------------------------- */
-
-/* cannot be async because we unref the CameraFile */
-static void
-do_close_read (GVfsBackend *backend,
-                GVfsJobCloseRead *job,
-                GVfsBackendHandle handle)
-{
-  ReadHandle *read_handle = (ReadHandle *) handle;
-  GVfsBackendGphoto2 *gphoto2_backend = G_VFS_BACKEND_GPHOTO2 (backend);
-
-  DEBUG ("close_read() handle=%p", handle);
-
-  g_mutex_lock (&gphoto2_backend->lock);
-  gphoto2_backend->open_read_handles = g_list_remove (gphoto2_backend->open_read_handles, read_handle);
-  g_mutex_unlock (&gphoto2_backend->lock);
-
-  free_read_handle (read_handle);
-  
-  g_vfs_job_succeeded (G_VFS_JOB (job));
 }
 
 /* ------------------------------------------------------------------------------------------------- */
@@ -3762,11 +3531,6 @@ g_vfs_backend_gphoto2_class_init (GVfsBackendGphoto2Class *klass)
 
   backend_class->try_mount = try_mount;
   backend_class->mount = do_mount;
-   backend_class->open_icon_for_read = do_open_icon_for_read;
-  backend_class->open_for_read = do_open_for_read;
-  backend_class->try_read = try_read;
-  backend_class->try_seek_on_read = try_seek_on_read;
-  backend_class->close_read = do_close_read;
   backend_class->query_info = do_query_info;
   backend_class->enumerate = do_enumerate;
   backend_class->query_fs_info = do_query_fs_info;
