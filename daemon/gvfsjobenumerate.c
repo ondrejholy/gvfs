@@ -220,6 +220,7 @@ g_vfs_job_enumerate_add_info (GVfsJobEnumerate *job,
         {
           job->cache_infos = g_list_append (job->cache_infos,
                                             g_object_ref (cache_info));
+          job->cache_count++;
         }
 
       g_object_unref (cache_info);
@@ -405,7 +406,8 @@ finished (GVfsJob *job)
                                        op_job->cache_infos,
                                        g_file_attribute_matcher_ref (op_job->attribute_matcher),
                                        op_job->flags,
-                                       op_job->cache_stamp);
+                                       op_job->cache_stamp,
+                                       op_job->cache_count);
         }
     }
 }

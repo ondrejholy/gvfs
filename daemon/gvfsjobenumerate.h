@@ -57,6 +57,7 @@ struct _GVfsJobEnumerate
   GList *cache_infos;
   gboolean cache_hit;
   gint64 cache_stamp;
+  guint cache_count;
 };
 
 struct _GVfsJobEnumerateClass

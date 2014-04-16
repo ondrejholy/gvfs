@@ -44,7 +44,8 @@ void                   g_vfs_enumeration_cache_set         (GVfsEnumerationCache
                                                             GList *infos,
                                                             GFileAttributeMatcher *matcher,
                                                             GFileQueryInfoFlags flags,
-                                                            gint64 stamp);
+                                                            gint64 stamp,
+                                                            guint count);
 GList *                g_vfs_enumeration_cache_find        (GVfsEnumerationCache *cache,
                                                             const gchar *path,
                                                             GFileAttributeMatcher *matcher,
