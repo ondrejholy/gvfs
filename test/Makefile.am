@@ -6,7 +6,8 @@ AM_CFLAGS =                       \
 	$(GLIB_CFLAGS)
 
 AM_LDFLAGS =                           \
-	$(GLIB_LIBS)
+	$(GLIB_LIBS)                         \
+	-lm
 
 noinst_PROGRAMS = \
 	test-query-info-stream    \
@@ -14,6 +15,7 @@ noinst_PROGRAMS = \
 	benchmark-gvfs-big-files      \
 	benchmark-posix-small-files   \
 	benchmark-posix-big-files     \
+	benchmark-info-cache           \
 	test-info-cache-structure     \
 	test-info-cache-integration   \
 	test-enumeration-cache-structure \
