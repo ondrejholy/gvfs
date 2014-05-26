@@ -293,7 +293,21 @@ expected_reply_free (ExpectedReply *reply)
 static void
 g_vfs_backend_sftp_init (GVfsBackendSftp *backend)
 {
+  GVfsInfoCache *info_cache;
+  GVfsEnumerationCache *enumeration_cache;
+  const gchar *env;
+
   backend->expected_replies = g_hash_table_new_full (NULL, NULL, NULL, (GDestroyNotify)expected_reply_free);
+
+  env = g_getenv ("GVFS_CACHE");
+  if (g_strcmp0 (env, "1") == 0)
+    {
+      info_cache = g_vfs_info_cache_new (1000, 1);
+      g_vfs_backend_set_info_cache (G_VFS_BACKEND (backend), info_cache);
+
+      enumeration_cache = g_vfs_enumeration_cache_new (1000, 1);
+      g_vfs_backend_set_enumeration_cache (G_VFS_BACKEND (backend), enumeration_cache);
+    }
 }
 
 static void
