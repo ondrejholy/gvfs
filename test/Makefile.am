@@ -16,6 +16,7 @@ noinst_PROGRAMS = \
 	benchmark-posix-big-files     \
 	test-info-cache-structure     \
 	test-info-cache-integration   \
+	test-enumeration-cache-structure \
 	$(NULL)
 
 test_info_cache_structure_SOURCES = \
@@ -24,6 +25,15 @@ test_info_cache_structure_SOURCES = \
 	test-info-cache-structure.c
 
 test_info_cache_structure_CFLAGS = \
+	$(GLIB_CFLAGS) \
+	-I../daemon
+
+test_enumeration_cache_structure_SOURCES = \
+	../daemon/gvfsenumerationcache.h \
+	../daemon/gvfsenumerationcache.c \
+	test-enumeration-cache-structure.c
+
+test_enumeration_cache_structure_CFLAGS = \
 	$(GLIB_CFLAGS) \
 	-I../daemon
 
