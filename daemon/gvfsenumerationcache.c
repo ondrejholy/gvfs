@@ -409,7 +409,7 @@ g_vfs_enumeration_cache_set (GVfsEnumerationCache *cache,
                              gint64 stamp,
                              guint count)
 {
-  GVfsEnumerationCacheEntry *entry;
+  GVfsEnumerationCacheEntry *entry = NULL;
   gchar *orig_path;
 
   g_assert (cache != NULL);
