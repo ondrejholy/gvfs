@@ -64,6 +64,7 @@
 #include "gvfsdaemonprotocol.h"
 #include "gvfsjobcreatemonitor.h"
 #include "gvfsmonitor.h"
+#include "gvfsfilecache.h"
 
 
 /* TODO:
@@ -180,6 +181,7 @@ G_DEFINE_TYPE (GVfsBackendLocalTest, g_vfs_backend_localtest, G_VFS_TYPE_BACKEND
 static void
 g_vfs_backend_localtest_init (GVfsBackendLocalTest *backend)
 {
+	GVfsFileCache *file_cache;
 	const char *c;
 
 	/*  Nothing in there */
@@ -200,7 +202,13 @@ g_vfs_backend_localtest_init (GVfsBackendLocalTest *backend)
 		backend->inject_op_types = g_ascii_strtoll(c, NULL, 0);
 		g_print ("(II) g_vfs_backend_localtest_init: setting 'inject_op_types' to '%lu' \n", (unsigned long)backend->inject_op_types);
 	}
-	
+
+	c = g_getenv ("GVFS_CACHE");
+	if (g_strcmp0 (c, "1") == 0) {
+		file_cache = g_vfs_file_cache_new ();
+		g_vfs_backend_set_file_cache (G_VFS_BACKEND (backend), file_cache);
+	}
+
 	g_print ("(II) g_vfs_backend_localtest_init done.\n");
 }
 
@@ -1233,6 +1241,59 @@ do_close_write (GVfsBackend *backend,
 }
 
 
+static void
+do_pull (GVfsBackend *backend,
+         GVfsJobPull *job,
+         const char *source,
+         const char *local_path,
+         GFileCopyFlags flags,
+         gboolean remove_source,
+         GFileProgressCallback progress_callback,
+         gpointer progress_callback_data)
+{
+  GFileInfo *info;
+  GError *error = NULL;
+  GFile *src_file, *dst_file;
+
+  g_print ("(II) try_pull %s -> %s \n", source, local_path);
+
+  src_file = get_g_file_from_local (source, G_VFS_JOB (job));
+  g_assert (src_file != NULL);
+
+  dst_file = get_g_file_from_local (local_path, G_VFS_JOB (job));
+  g_assert (dst_file != NULL);
+
+  info = get_g_file_info_from_local (source, src_file,
+                                     G_FILE_ATTRIBUTE_STANDARD_TYPE,
+                                     flags, G_VFS_JOB (job));
+  if (info && g_file_info_get_file_type (info) != G_FILE_TYPE_REGULAR) {
+    g_vfs_job_failed (G_VFS_JOB (job), G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                      _("Not supported"));
+    g_object_unref (src_file);
+    g_object_unref (dst_file);
+    g_object_unref (info);
+    return;
+  }
+
+  if (remove_source) {
+    g_file_move (src_file, dst_file, flags, G_VFS_JOB (job)->cancellable, progress_callback, progress_callback_data, &error);
+  } else {
+    g_file_copy (src_file, dst_file, flags, G_VFS_JOB (job)->cancellable, progress_callback, progress_callback_data, &error);
+  }
+
+  if (error)  {
+    g_vfs_job_failed_from_error (G_VFS_JOB (job), error); 
+    g_print ("  (EE) try_pull: failed, error: %s \n", error->message);
+    g_error_free (error);
+  } else {
+    g_vfs_job_succeeded (G_VFS_JOB (job));
+    g_print ("(II) try_pull success. \n");
+  }
+
+  g_object_unref (src_file);
+  g_object_unref (dst_file);
+  g_clear_object (&info);
+}
 
 
 
@@ -1282,4 +1343,5 @@ g_vfs_backend_localtest_class_init (GVfsBackendLocalTestClass *klass)
   backend_class->create_file_monitor = do_create_file_monitor;
   backend_class->query_settable_attributes = do_query_settable_attributes;
   backend_class->query_writable_namespaces = do_query_writable_namespaces;
+  backend_class->pull = do_pull;
 }
