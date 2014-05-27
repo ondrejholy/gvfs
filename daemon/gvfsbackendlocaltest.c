@@ -180,6 +180,8 @@ G_DEFINE_TYPE (GVfsBackendLocalTest, g_vfs_backend_localtest, G_VFS_TYPE_BACKEND
 static void
 g_vfs_backend_localtest_init (GVfsBackendLocalTest *backend)
 {
+	GVfsInfoCache *info_cache;
+	GVfsEnumerationCache *enumeration_cache;
 	const char *c;
 
 	/*  Nothing in there */
@@ -200,7 +202,16 @@ g_vfs_backend_localtest_init (GVfsBackendLocalTest *backend)
 		backend->inject_op_types = g_ascii_strtoll(c, NULL, 0);
 		g_print ("(II) g_vfs_backend_localtest_init: setting 'inject_op_types' to '%lu' \n", (unsigned long)backend->inject_op_types);
 	}
-	
+
+	c = g_getenv ("GVFS_CACHE");
+	if (g_strcmp0 (c, "1") == 0) {
+		info_cache = g_vfs_info_cache_new (1000, 1);
+		g_vfs_backend_set_info_cache (G_VFS_BACKEND (backend), info_cache);
+
+		enumeration_cache = g_vfs_enumeration_cache_new (1000, 1);
+		g_vfs_backend_set_enumeration_cache (G_VFS_BACKEND (backend), enumeration_cache);
+	}
+
 	g_print ("(II) g_vfs_backend_localtest_init done.\n");
 }
 
