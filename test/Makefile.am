@@ -17,6 +17,7 @@ noinst_PROGRAMS = \
 	test-info-cache-structure     \
 	test-info-cache-integration   \
 	test-enumeration-cache-structure \
+	test-enumeration-cache-integration \
 	$(NULL)
 
 test_info_cache_structure_SOURCES = \
